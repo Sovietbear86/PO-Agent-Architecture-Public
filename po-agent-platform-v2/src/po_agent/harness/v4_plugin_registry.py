@@ -1,0 +1,274 @@
+"""Trusted plugin registry for the V4 skill-native runtime.
+
+This module is deliberately outside Agent Core orchestration. It owns declarative
+skill/capability registration, handler binding and optional presentation metadata.
+A new skill can be added through the trusted ``v4_plugins`` namespace without
+changing planner/runtime trajectory code.
+"""
+from __future__ import annotations
+
+import importlib
+import logging
+import pkgutil
+import time
+from dataclasses import dataclass, field
+from types import ModuleType
+from typing import Any, Callable, Mapping
+
+from .agent_core_v4 import CapabilityHandlerV4, CapabilitySpecV4, SkillSpecV4
+
+TRUSTED_PLUGIN_PACKAGE = "po_agent.harness.v4_plugins"
+HandlerBuilderV4 = Callable[[Any], CapabilityHandlerV4]
+
+logger = logging.getLogger(__name__)
+
+
+class V4PluginError(RuntimeError):
+    """Fail-closed plugin contract/discovery error."""
+
+
+@dataclass(frozen=True)
+class UIContractV4:
+    """Presentation hint only; never controls source execution."""
+
+    result_kind: str
+    preferred_widget: str | None = None
+    required_fields: tuple[str, ...] = ()
+    states: tuple[str, ...] = (
+        "LOADING",
+        "SUCCESS_WITH_DATA",
+        "REAL_EMPTY",
+        "SOURCE_UNAVAILABLE",
+        "ERROR",
+    )
+
+    def compact(self) -> dict[str, Any]:
+        return {
+            "result_kind": self.result_kind,
+            "preferred_widget": self.preferred_widget,
+            "required_fields": list(self.required_fields),
+            "states": list(self.states),
+        }
+
+
+@dataclass(frozen=True)
+class CapabilityBindingV4:
+    """Declarative binding from a V4 capability to a governed handler.
+
+    ``handler_builder`` is a trusted plugin extension seam for capabilities that
+    need a source adapter but do not belong in Agent Core. This keeps per-skill
+    business/source logic outside planner/runtime orchestration while preserving
+    the same allow-listed registry boundary.
+
+    ``fixed_arguments`` lets a plugin expose a narrower typed capability over a
+    proven generic handler (for example Excel-only attachment search) without
+    adding a business-specific branch to Agent Core. Fixed values are
+    authoritative contract arguments and overwrite planner-provided values at the
+    binding seam before the governed handler is invoked.
+    """
+
+    capability_id: str
+    handler_method: str | None = None
+    legacy_capability_id: str | None = None
+    handler_builder: HandlerBuilderV4 | None = None
+    fixed_arguments: Mapping[str, str] = field(default_factory=dict)
+
+    def validate(self) -> None:
+        if not self.capability_id.strip():
+            raise V4PluginError("empty capability binding id")
+        choices = int(bool(self.handler_method)) + int(bool(self.legacy_capability_id)) + int(self.handler_builder is not None)
+        if choices != 1:
+            raise V4PluginError(
+                f"capability {self.capability_id} must declare exactly one handler binding"
+            )
+        for key, value in self.fixed_arguments.items():
+            if not str(key).strip() or not str(value).strip():
+                raise V4PluginError(
+                    f"capability {self.capability_id} has empty fixed argument"
+                )
+
+
+@dataclass(frozen=True)
+class V4SkillPlugin:
+    """Stable plugin-facing contract.
+
+    ``skills`` carry procedural/completion contracts, ``capabilities`` carry typed
+    capability metadata, ``bindings`` attach them to governed handlers, and
+    ``ui`` carries optional frontend hints.
+    """
+
+    plugin_id: str
+    skills: tuple[SkillSpecV4, ...]
+    capabilities: tuple[CapabilitySpecV4, ...]
+    bindings: tuple[CapabilityBindingV4, ...]
+    ui: Mapping[str, UIContractV4] = field(default_factory=dict)
+
+
+class V4PluginRegistry:
+    """Deterministic, fail-closed registry for trusted V4 plugins."""
+
+    def __init__(self, plugins: tuple[V4SkillPlugin, ...]) -> None:
+        self._plugins = tuple(sorted(plugins, key=lambda item: item.plugin_id))
+        self._skills: dict[str, SkillSpecV4] = {}
+        self._capabilities: dict[str, CapabilitySpecV4] = {}
+        self._bindings: dict[str, CapabilityBindingV4] = {}
+        self._ui: dict[str, UIContractV4] = {}
+        seen_plugins: set[str] = set()
+
+        for plugin in self._plugins:
+            if not plugin.plugin_id.strip():
+                raise V4PluginError("plugin_id must be non-empty")
+            if plugin.plugin_id in seen_plugins:
+                raise V4PluginError(f"duplicate plugin id: {plugin.plugin_id}")
+            seen_plugins.add(plugin.plugin_id)
+
+            for capability in plugin.capabilities:
+                if capability.id in self._capabilities:
+                    raise V4PluginError(f"duplicate capability id: {capability.id}")
+                self._capabilities[capability.id] = capability
+
+            for binding in plugin.bindings:
+                binding.validate()
+                if binding.capability_id in self._bindings:
+                    raise V4PluginError(f"duplicate capability binding: {binding.capability_id}")
+                self._bindings[binding.capability_id] = binding
+
+            for skill in plugin.skills:
+                if skill.id in self._skills:
+                    raise V4PluginError(f"duplicate skill id: {skill.id}")
+                self._skills[skill.id] = skill
+
+            for skill_id, contract in plugin.ui.items():
+                if skill_id in self._ui:
+                    raise V4PluginError(f"duplicate UI contract for skill: {skill_id}")
+                self._ui[skill_id] = contract
+
+        if set(self._bindings) != set(self._capabilities):
+            missing = sorted(set(self._capabilities) - set(self._bindings))
+            extra = sorted(set(self._bindings) - set(self._capabilities))
+            raise V4PluginError(f"capability binding mismatch: missing={missing}, extra={extra}")
+
+        for skill in self._skills.values():
+            missing = sorted(set(skill.capabilities) - set(self._capabilities))
+            if missing:
+                raise V4PluginError(
+                    f"skill {skill.id} references unknown capabilities: {missing}"
+                )
+        unknown_ui = sorted(set(self._ui) - set(self._skills))
+        if unknown_ui:
+            raise V4PluginError(f"UI contracts reference unknown skills: {unknown_ui}")
+
+    @property
+    def plugin_ids(self) -> tuple[str, ...]:
+        return tuple(plugin.plugin_id for plugin in self._plugins)
+
+    def skills(self) -> tuple[SkillSpecV4, ...]:
+        return tuple(self._skills[key] for key in sorted(self._skills))
+
+    def capability_specs(self) -> dict[str, CapabilitySpecV4]:
+        return {key: self._capabilities[key] for key in sorted(self._capabilities)}
+
+    def ui_contracts(self) -> dict[str, UIContractV4]:
+        return {key: self._ui[key] for key in sorted(self._ui)}
+
+    @staticmethod
+    def _apply_fixed_arguments(
+        base_handler: CapabilityHandlerV4,
+        fixed_arguments: Mapping[str, str],
+    ) -> CapabilityHandlerV4:
+        fixed = {str(key): str(value) for key, value in fixed_arguments.items()}
+
+        async def execute(arguments: dict[str, str]):
+            # The plugin contract is authoritative for fixed semantic arguments;
+            # a stochastic planner cannot redirect a specialized capability to a
+            # different subtype by supplying a conflicting value.
+            merged = {**arguments, **fixed}
+            return await base_handler(merged)
+
+        return execute
+
+    @staticmethod
+    def _instrument_handler(
+        capability_id: str,
+        handler: CapabilityHandlerV4,
+    ) -> CapabilityHandlerV4:
+        async def execute(arguments: dict[str, str]):
+            started = time.perf_counter()
+            outcome = "ok"
+            try:
+                return await handler(arguments)
+            except Exception:
+                outcome = "error"
+                raise
+            finally:
+                logger.info(
+                    "V4 capability completed",
+                    extra={
+                        "capability_id": capability_id,
+                        "duration_ms": int((time.perf_counter() - started) * 1000),
+                        "outcome": outcome,
+                    },
+                )
+
+        return execute
+
+    def bind_handlers(self, runtime: Any) -> dict[str, CapabilityHandlerV4]:
+        handlers: dict[str, CapabilityHandlerV4] = {}
+        for capability_id in sorted(self._bindings):
+            binding = self._bindings[capability_id]
+            if binding.handler_method:
+                handler = getattr(runtime, binding.handler_method, None)
+                if handler is None or not callable(handler):
+                    raise V4PluginError(
+                        f"capability {capability_id} handler is unavailable: {binding.handler_method}"
+                    )
+            elif binding.handler_builder is not None:
+                handler = binding.handler_builder(runtime)
+                if handler is None or not callable(handler):
+                    raise V4PluginError(
+                        f"capability {capability_id} handler builder returned no callable"
+                    )
+            else:
+                handler = runtime._legacy(binding.legacy_capability_id)  # governed legacy facade
+            if binding.fixed_arguments:
+                handler = self._apply_fixed_arguments(handler, binding.fixed_arguments)
+            handlers[capability_id] = self._instrument_handler(capability_id, handler)
+        return handlers
+
+    def with_plugin(self, plugin: V4SkillPlugin) -> "V4PluginRegistry":
+        """Return a new registry; useful for bounded tests and future controlled loading."""
+        return V4PluginRegistry(self._plugins + (plugin,))
+
+
+def _load_plugin_from_module(module: ModuleType) -> V4SkillPlugin:
+    plugin = getattr(module, "PLUGIN", None)
+    if not isinstance(plugin, V4SkillPlugin):
+        raise V4PluginError(
+            f"trusted plugin module {module.__name__} must export PLUGIN: V4SkillPlugin"
+        )
+    return plugin
+
+
+def discover_v4_plugins(package_name: str = TRUSTED_PLUGIN_PACKAGE) -> V4PluginRegistry:
+    """Discover plugins only under the trusted application namespace.
+
+    Arbitrary filesystem paths and user-provided import names are intentionally not
+    supported. Modules are imported in sorted order so catalog construction is
+    deterministic across restarts.
+    """
+    if package_name != TRUSTED_PLUGIN_PACKAGE:
+        raise V4PluginError(f"untrusted V4 plugin package: {package_name}")
+    package = importlib.import_module(package_name)
+    package_path = getattr(package, "__path__", None)
+    if package_path is None:
+        raise V4PluginError(f"trusted V4 plugin package has no package path: {package_name}")
+
+    modules = sorted(
+        info.name
+        for info in pkgutil.iter_modules(package_path, package.__name__ + ".")
+        if not info.name.rsplit(".", 1)[-1].startswith("_")
+    )
+    if not modules:
+        raise V4PluginError("no trusted V4 plugins discovered")
+    plugins = tuple(_load_plugin_from_module(importlib.import_module(name)) for name in modules)
+    return V4PluginRegistry(plugins)

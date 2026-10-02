@@ -1,0 +1,307 @@
+"""Production AS21 adapter extensions over the proven Task API boundary."""
+from __future__ import annotations
+
+import re
+from typing import Any, Optional
+
+import httpx
+
+from po_agent.domain.models import Task
+
+from .task_api import (
+    AS21SourceError,
+    AS21SourceUnavailable,
+    TaskApiAS21Adapter,
+    _parse_query,
+    _task_matches,
+)
+
+
+class ProductionTaskApiAS21Adapter(TaskApiAS21Adapter):
+    """Production adapter whose factual task reads are live REAL AS21 only.
+
+    The historical local `/api/v1/tasks` store is deliberately not used by
+    `search_tasks`. All search/scan consumers go through the bounded live
+    swtr-read facade; source failure therefore fails closed instead of becoming a
+    false empty result.
+    """
+
+    source_facts = frozenset({"tasks", "attachments", "history", "sprints", "releases"})
+
+    @staticmethod
+    def _find_identifier(value: Any) -> str | None:
+        if isinstance(value, str):
+            text = value.strip()
+            return text or None
+        if isinstance(value, dict):
+            for key in ("code", "id", "sprintId", "sprint_id", "value"):
+                candidate = value.get(key)
+                if isinstance(candidate, (str, int)) and str(candidate).strip():
+                    return str(candidate).strip()
+            for nested in value.values():
+                candidate = ProductionTaskApiAS21Adapter._find_identifier(nested)
+                if candidate:
+                    return candidate
+        if isinstance(value, list):
+            for item in value:
+                candidate = ProductionTaskApiAS21Adapter._find_identifier(item)
+                if candidate:
+                    return candidate
+        return None
+
+    async def get_task(self, task_key: str) -> Optional[Task]:
+        normalized = (task_key or "").upper().strip()
+        if not re.fullmatch(r"[A-Z][A-Z0-9]*-\d+", normalized):
+            return None
+        try:
+            response = await self._get_resilient(f"/api/v1/swtr-read/tasks/{normalized}")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            if exc.response.status_code in (502, 503):
+                raise AS21SourceUnavailable(f"task-api exact task read unavailable: HTTP {exc.response.status_code}") from exc
+            raise AS21SourceError(f"task-api exact task read failed: HTTP {exc.response.status_code}") from exc
+        except httpx.HTTPError as exc:
+            raise AS21SourceUnavailable(f"task-api exact task read failed: {type(exc).__name__}") from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AS21SourceError("task-api exact task endpoint returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise AS21SourceError("task-api exact task endpoint returned malformed payload")
+        unit = payload.get("unit")
+        if not isinstance(unit, dict):
+            raise AS21SourceError("task-api exact task endpoint did not provide a unit object")
+        source_id = unit.get("code") or payload.get("task_code")
+        if not isinstance(source_id, str) or source_id.upper().strip() != normalized:
+            raise AS21SourceError("task-api exact task endpoint returned a mismatched task code")
+        title = unit.get("summary") or unit.get("title") or unit.get("name")
+        if not isinstance(title, str) or not title.strip():
+            raise AS21SourceError("task-api exact task endpoint returned a task without title")
+        row: dict[str, Any] = {
+            "source_id": normalized,
+            "title": title,
+            "description": unit.get("description"),
+            "status": unit.get("workflow_status") or unit.get("status") or "",
+            "created_at": unit.get("created_at") or unit.get("createdAt") or unit.get("created"),
+            "updated_at": unit.get("updated_at") or unit.get("updatedAt") or unit.get("updated"),
+            "deadline": unit.get("deadline") or unit.get("due_date") or unit.get("dueDate"),
+            "source": "swtr",
+            "source_data": unit,
+        }
+        mapped = self._map(row)
+        if mapped is None:
+            raise AS21SourceError("live SWTR task cannot be mapped to canonical Task")
+        attachments = await self.get_attachment_metadata(normalized)
+        return mapped.model_copy(update={"attachments": attachments})
+
+    async def get_current_sprint_id(self, space: str) -> str | None:
+        normalized = (space or "").upper().strip()
+        if not normalized:
+            return None
+        try:
+            response = await self._get_resilient(f"/api/v1/swtr-read/spaces/{normalized}/current-sprint")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise AS21SourceUnavailable(f"task-api current sprint read failed: HTTP {exc.response.status_code}") from exc
+        except httpx.HTTPError as exc:
+            raise AS21SourceUnavailable(f"task-api current sprint read failed: {type(exc).__name__}") from exc
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AS21SourceError("task-api current sprint endpoint returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise AS21SourceError("task-api current sprint endpoint returned malformed payload")
+        return self._find_identifier(payload.get("sprint"))
+
+    async def list_sprints(self, space: str) -> list[dict[str, Any]]:
+        normalized = (space or "").upper().strip()
+        if not normalized:
+            return []
+        try:
+            response = await self._get_resilient(f"/api/v1/swtr-read/spaces/{normalized}/sprints")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return []
+            raise AS21SourceUnavailable(f"task-api sprint directory read failed: HTTP {exc.response.status_code}") from exc
+        except httpx.HTTPError as exc:
+            raise AS21SourceUnavailable(f"task-api sprint directory read failed: {type(exc).__name__}") from exc
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AS21SourceError("task-api sprint directory returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise AS21SourceError("task-api sprint directory returned malformed payload")
+        rows = payload.get("sprints")
+        if not isinstance(rows, list):
+            raise AS21SourceError("task-api sprint directory did not provide sprint rows")
+        sprints: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise AS21SourceError("task-api sprint directory row is not an object")
+            code = str(row.get("code") or "").strip()
+            if not code:
+                continue
+            sprints.append({
+                "code": code, "name": str(row.get("name") or ""), "status": str(row.get("status") or ""),
+                "start_at": row.get("start_at"), "finish_at": row.get("finish_at"),
+                "deleted": bool(row.get("deleted", False)), "space": normalized, "source": "REAL_AS21",
+            })
+        return sprints
+
+    async def get_space_task_count(self, space: str) -> dict[str, Any]:
+        normalized = (space or "").upper().strip()
+        if not normalized:
+            raise AS21SourceError("space is required for task count")
+        try:
+            response = await self._get_resilient("/api/v1/swtr-read/task-count", params={"space": normalized})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (502, 503, 504):
+                raise AS21SourceUnavailable(f"task-api space task count unavailable: HTTP {exc.response.status_code}") from exc
+            raise AS21SourceError(f"task-api space task count failed: HTTP {exc.response.status_code}") from exc
+        except httpx.HTTPError as exc:
+            raise AS21SourceUnavailable(f"task-api space task count failed: {type(exc).__name__}") from exc
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AS21SourceError("task-api space task count returned invalid JSON") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("total"), int):
+            raise AS21SourceError("task-api space task count returned malformed payload")
+        return payload
+
+    async def search_tasks(self, jql: str, max_results: int = 50, fields: Optional[list[str]] = None) -> list[Task]:
+        """Search only through the live REAL AS21 task-query facade."""
+        del fields
+        if max_results < 0:
+            raise ValueError("max_results must be >= 0")
+        if max_results == 0:
+            return []
+
+        filters, free_text = _parse_query(jql)
+        assignee = filters.get("assignee")
+        project_space = filters.get("project_space")
+        params: dict[str, Any] = {"limit": 100, "max_pages": 100}
+        if assignee:
+            params["assignee"] = assignee
+        if project_space:
+            params["space"] = project_space
+        release_id = filters.get("release_id")
+        if free_text:
+            params["phrase"] = free_text
+        if release_id:
+            params["release"] = release_id
+
+        try:
+            response = await self._get_resilient("/api/v1/swtr-read/task-query", params=params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return []
+            if exc.response.status_code in (502, 503):
+                raise AS21SourceUnavailable(f"task-api live task query unavailable: HTTP {exc.response.status_code}") from exc
+            raise AS21SourceError(f"task-api live task query failed: HTTP {exc.response.status_code}") from exc
+        except httpx.HTTPError as exc:
+            raise AS21SourceUnavailable(f"task-api live task query failed: {type(exc).__name__}") from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AS21SourceError("task-api live task query returned invalid JSON") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("tasks"), list):
+            raise AS21SourceError("task-api live task query returned malformed payload")
+
+        resolved_external_id = str(payload.get("external_id") or "").strip() or assignee
+        remaining_filters = dict(filters)
+        remaining_filters.pop("assignee", None)
+        remaining_filters.pop("project_space", None)
+        tasks: list[Task] = []
+        for row in payload["tasks"]:
+            if not isinstance(row, dict):
+                raise AS21SourceError("task-api live task query row is not an object")
+            mapped = self._map(row)
+            if mapped is None:
+                continue
+            if assignee and not (mapped.assignee_id or mapped.assignee_login):
+                mapped = mapped.model_copy(update={"assignee_id": resolved_external_id})
+            if _task_matches(mapped, remaining_filters, ""):
+                tasks.append(mapped)
+        return tasks[:max_results]
+
+    async def get_sprint_tasks(self, sprint_id: str, space: str | None = None) -> list[Task]:
+        normalized = (sprint_id or "").strip()
+        if not normalized:
+            return []
+        try:
+            response = await self._get_resilient(
+                f"/api/v1/swtr-read/sprints/{normalized}/tasks",
+                params={"complete": "true", "limit": 100, "max_pages": 100},
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return []
+            raise AS21SourceUnavailable(f"task-api sprint task read failed: HTTP {exc.response.status_code}") from exc
+        except httpx.HTTPError as exc:
+            raise AS21SourceUnavailable(f"task-api sprint task read failed: {type(exc).__name__}") from exc
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AS21SourceError("task-api sprint task endpoint returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise AS21SourceError("task-api sprint task endpoint returned malformed payload")
+        if payload.get("complete") is False:
+            raise AS21SourceError(f"task-api sprint task collection is incomplete for {normalized}: the source could not prove a complete set")
+        rows = payload.get("complete_tasks")
+        if not isinstance(rows, list):
+            tasks_payload = payload.get("tasks")
+            rows = tasks_payload.get("content") if isinstance(tasks_payload, dict) else None
+        if not isinstance(rows, list):
+            raise AS21SourceError("task-api sprint task endpoint did not provide task rows")
+        tasks: list[Task] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise AS21SourceError("task-api sprint task row is not an object")
+            mapped = self._map(row)
+            if mapped is None:
+                continue
+            if space and (mapped.project_space or "").casefold() != space.casefold():
+                continue
+            if (mapped.sprint_id or "").casefold() != normalized.casefold():
+                continue
+            tasks.append(mapped)
+        return tasks
+
+    async def _task_backed_versions(self, *, query: str | None = None, space: str | None = None) -> list[dict[str, Any]]:
+        tasks = await self.search_tasks("", max_results=self._scan_limit)
+        wanted_query = (query or "").strip().casefold()
+        wanted_space = (space or "").strip().casefold()
+        by_id: dict[str, dict[str, Any]] = {}
+        for task in tasks:
+            release_id = (task.release_id or "").strip()
+            if not release_id:
+                continue
+            if wanted_space and (task.project_space or "").casefold() != wanted_space:
+                continue
+            if wanted_query and wanted_query not in release_id.casefold():
+                continue
+            item = by_id.setdefault(release_id, {"id": release_id, "code": release_id, "name": release_id, "source": "canonical_as21_task.fix_version_s", "evidence_task_keys": [], "fallback": True})
+            item["evidence_task_keys"].append(task.key)
+        return [by_id[key] for key in sorted(by_id)]
+
+    async def search_versions(self, *, query: str | None = None, space: str | None = None) -> Any:
+        params: dict[str, Any] = {"limit": 100}
+        if query:
+            params["query"] = query
+        if space:
+            params["space"] = space
+        try:
+            response = await self._get_resilient("/api/v1/swtr-read/versions", params=params)
+        except (httpx.HTTPError, AS21SourceUnavailable):
+            return await self._task_backed_versions(query=query, space=space)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AS21SourceError("task-api versions endpoint returned invalid JSON") from exc
+        if not isinstance(payload, dict) or "versions" not in payload:
+            raise AS21SourceError("task-api versions endpoint returned malformed payload")
+        return payload["versions"]

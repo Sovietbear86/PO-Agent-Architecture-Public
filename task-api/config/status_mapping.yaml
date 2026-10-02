@@ -1,0 +1,64 @@
+# Generic status normalization for the community distribution.
+# Prefer source statusType/status text. Add deployment-specific codes only in
+# your private configuration if your AS21 workflow requires them.
+
+status_mapping:
+  open:
+    local_status: todo
+    display_name: "Open"
+    category: backlog
+
+  in_progress:
+    local_status: in_progress
+    display_name: "In progress"
+    category: active_work
+
+  "In progress":
+    local_status: in_progress
+    display_name: "In progress"
+    category: active_work
+
+  "Need info":
+    local_status: todo
+    display_name: "Need info"
+    category: waiting
+
+  "Ready for review":
+    local_status: todo
+    display_name: "Ready for review"
+    category: review_queue
+
+  "In review":
+    local_status: in_progress
+    display_name: "In review"
+    category: review
+
+  "Ready for QA":
+    local_status: todo
+    display_name: "Ready for QA"
+    category: qa_queue
+
+  QA:
+    local_status: in_progress
+    display_name: "QA"
+    category: testing
+
+  Resolved:
+    local_status: done
+    display_name: "Resolved"
+    category: completed_pending
+
+  Closed:
+    local_status: done
+    display_name: "Closed"
+    category: completed
+
+  Cancelled:
+    local_status: done
+    display_name: "Cancelled"
+    category: cancelled
+
+fallback_mapping:
+  done: done
+  in_progress: in_progress
+  other: todo

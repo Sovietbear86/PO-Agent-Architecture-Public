@@ -1,0 +1,259 @@
+"""Live-source grounding extensions for production AS21 mode."""
+from __future__ import annotations
+
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from .dialogue_runtime import ClarificationNeed, SemanticFrame
+from .entity_grounding import GroundedEntityResolver
+
+
+def configured_product_aliases() -> dict[str, str]:
+    """Load product aliases from deployment-owned products.yaml."""
+    configured = os.getenv("PRODUCTS_CONFIG_PATH")
+    candidates = [
+        Path(configured).expanduser() if configured else None,
+        Path(os.getcwd()) / "task-api" / "config" / "products.yaml",
+        Path(os.getcwd()).parent / "task-api" / "config" / "products.yaml",
+    ]
+    for path in candidates:
+        if path is None or not path.exists():
+            continue
+        with path.open("r", encoding="utf-8") as stream:
+            data = yaml.safe_load(stream) or {}
+        products = data.get("products") if isinstance(data, dict) else None
+        if not isinstance(products, dict):
+            continue
+        aliases: dict[str, str] = {}
+        for code, payload in products.items():
+            canonical = str(code).strip().upper()
+            if not canonical:
+                continue
+            aliases[canonical.casefold()] = canonical
+            if isinstance(payload, dict):
+                display = payload.get("display_name")
+                if isinstance(display, str) and display.strip():
+                    aliases[display.strip().casefold()] = canonical
+                for alias in payload.get("aliases") or []:
+                    if isinstance(alias, str) and alias.strip():
+                        aliases[alias.strip().casefold()] = canonical
+        return aliases
+    return {}
+
+
+class LiveGroundedEntityResolver(GroundedEntityResolver):
+    """Resolve production entities from real Task API/SWTR source facts."""
+
+    _PRODUCT_ALIASES = configured_product_aliases()
+    _CURRENT_MARKERS = ("current", "active", "текущ", "актуальн", "активн")
+    _EXPLICIT_RELEASE_RE = re.compile(
+        r"(?:релиз(?:а|е|у|ом)?|release)\s+([A-Za-z0-9][A-Za-z0-9_.-]{2,79})",
+        re.I,
+    )
+    _SPRINT_ID_RE = re.compile(r"\b[A-ZА-Я][A-ZА-Я0-9_]{1,15}-SPRNT-\d+\b", re.I)
+
+    @classmethod
+    def _normalize_product(cls, value: str | None) -> str | None:
+        if not value:
+            return None
+        raw = value.strip()
+        mapped = cls._PRODUCT_ALIASES.get(raw.casefold())
+        return mapped or raw.upper()
+
+    @classmethod
+    def _explicit_product_from_query(cls, query: str) -> str | None:
+        low = query.casefold()
+        matches = {canonical for alias, canonical in cls._PRODUCT_ALIASES.items() if alias in low}
+        return next(iter(matches)) if len(matches) == 1 else None
+
+    @classmethod
+    def _explicit_release_from_query(cls, query: str) -> str | None:
+        match = cls._EXPLICIT_RELEASE_RE.search(query)
+        return match.group(1).strip() if match else None
+
+    @classmethod
+    def _asks_current_sprint(cls, raw: str | None, query: str) -> bool:
+        text = f"{raw or ''} {query}".casefold()
+        mentions_sprint = "спринт" in text or "sprint" in text
+        return mentions_sprint and any(marker in text for marker in cls._CURRENT_MARKERS)
+
+    @classmethod
+    def _query_contains_sprint_id(cls, query: str, sprint_id: str) -> bool:
+        wanted = sprint_id.strip().casefold()
+        return any(match.group(0).casefold() == wanted for match in cls._SPRINT_ID_RE.finditer(query))
+
+    @staticmethod
+    def _release_identifier(item: Any) -> str | None:
+        if isinstance(item, str):
+            value = item.strip()
+            return value or None
+        if isinstance(item, dict):
+            for key in ("id", "code", "name", "value"):
+                value = item.get(key)
+                if isinstance(value, (str, int)) and str(value).strip():
+                    return str(value).strip()
+        return None
+
+    async def semantic_context(self) -> dict[str, Any]:
+        context = await super().semantic_context()
+        search_versions = getattr(self.adapter, "search_versions", None)
+        if callable(search_versions):
+            versions = await search_versions()
+            if isinstance(versions, dict):
+                candidates = versions.get("content") or versions.get("items") or versions.get("versions") or []
+            else:
+                candidates = versions if isinstance(versions, list) else []
+            merged = {str(value) for value in context.get("known_releases", []) if value}
+            for item in candidates:
+                release_id = self._release_identifier(item)
+                if release_id:
+                    merged.add(release_id)
+            context["known_releases"] = sorted(merged)
+        return context
+
+    async def _explicit_sprint_has_source_evidence(self, sprint_id: str) -> bool:
+        """Require positive source evidence, not an echoed selector.
+
+        MCP's sprint-task facade currently echoes the requested sprint_id even
+        when the identifier is invented. In production we can additionally ask
+        the adapter for the complete sprint corpus. A non-empty corpus is
+        positive evidence. An empty corpus is treated as unproven and therefore
+        fails closed rather than silently executing an unfiltered/false-empty
+        query. Adapters used by narrow unit tests may not expose get_sprint_tasks;
+        those retain the legacy validator-only contract.
+        """
+        reader = getattr(self.adapter, "get_sprint_tasks", None)
+        if not callable(reader):
+            return True
+        tasks = await reader(sprint_id)
+        return bool(tasks)
+
+    async def _ground_live_explicit_sprint(self, frame: SemanticFrame, original_query: str) -> SemanticFrame | None:
+        """Validate and preserve a user-supplied full sprint ID using live SWTR.
+
+        The cached task scan is not an authoritative sprint directory. If the
+        precision layer extracted a full sprint ID, validate that exact ID via
+        live source evidence. A source endpoint echo by itself is insufficient:
+        where a complete sprint corpus is available, at least one source-backed
+        task is required to prove the selector. Unproven selectors fail closed.
+        """
+        explicit = (frame.slots.get("sprint_id") or "").strip()
+        if not explicit:
+            return None
+        validator = getattr(self.adapter, "sprint_exists", None)
+        if not callable(validator):
+            return None
+        exists = await validator(explicit)
+        if exists:
+            exists = await self._explicit_sprint_has_source_evidence(explicit)
+        if not exists:
+            return SemanticFrame(
+                canonical_query=frame.canonical_query,
+                intent_hint=frame.intent_hint,
+                slots={k: v for k, v in frame.slots.items() if k != "sprint_id"},
+                clarifications=[
+                    *[item for item in frame.clarifications if item.field != "sprint_id"],
+                    ClarificationNeed("sprint_id", f"Не могу подтвердить спринт «{explicit}» по данным AS21. Какой спринт выбрать?"),
+                ],
+                confidence=frame.confidence,
+                llm_used=frame.llm_used,
+            )
+
+        protected_slots = dict(frame.slots)
+        protected_slots.pop("sprint_id", None)
+        protected_frame = SemanticFrame(
+            canonical_query=frame.canonical_query,
+            intent_hint=frame.intent_hint,
+            slots=protected_slots,
+            clarifications=[item for item in frame.clarifications if item.field != "sprint_id"],
+            confidence=frame.confidence,
+            llm_used=frame.llm_used,
+        )
+        grounded = await super().ground(protected_frame, original_query)
+        slots = dict(grounded.slots)
+        slots["sprint_id"] = explicit
+        slots.pop("sprint_raw", None)
+        canonical = grounded.canonical_query.replace("{sprint_id}", explicit)
+        return SemanticFrame(
+            canonical_query=canonical,
+            intent_hint=grounded.intent_hint,
+            slots=slots,
+            clarifications=[item for item in grounded.clarifications if item.field != "sprint_id"],
+            confidence=grounded.confidence,
+            llm_used=grounded.llm_used,
+        )
+
+    async def ground(self, frame: SemanticFrame, original_query: str) -> SemanticFrame:
+        slots = dict(frame.slots)
+        product = self._normalize_product(slots.get("product")) or self._explicit_product_from_query(original_query)
+        if product:
+            slots["product"] = product
+
+        # A semantic model may propose a concrete sprint_id for a relative
+        # phrase such as "текущий спринт PRD1". Treat that value as a proposal,
+        # not as a user-supplied explicit identifier. The authoritative value
+        # must come from the live current-sprint source below.
+        proposed_sprint = str(slots.get("sprint_id") or "").strip()
+        if (
+            proposed_sprint
+            and self._asks_current_sprint(slots.get("sprint_raw"), original_query)
+            and not self._query_contains_sprint_id(original_query, proposed_sprint)
+        ):
+            slots.pop("sprint_id", None)
+            slots["sprint_raw"] = "current"
+
+        if not slots.get("release_id") and not slots.get("release_raw"):
+            explicit_release = self._explicit_release_from_query(original_query)
+            if explicit_release:
+                slots["release_raw"] = explicit_release
+
+        canonical_query = frame.canonical_query
+        if slots.get("release_raw") and not slots.get("release_id") and "{release_id}" not in canonical_query:
+            canonical_query = f"{canonical_query.rstrip()} {{release_id}}"
+
+        frame = SemanticFrame(
+            canonical_query=canonical_query,
+            intent_hint=frame.intent_hint,
+            slots=slots,
+            clarifications=frame.clarifications,
+            confidence=frame.confidence,
+            llm_used=frame.llm_used,
+        )
+
+        live_explicit = await self._ground_live_explicit_sprint(frame, original_query)
+        if live_explicit is not None:
+            return live_explicit
+
+        grounded = await super().ground(frame, original_query)
+
+        current_raw = grounded.slots.get("sprint_raw") or frame.slots.get("sprint_raw")
+        if not product or not self._asks_current_sprint(current_raw, original_query):
+            return grounded
+
+        resolver = getattr(self.adapter, "get_current_sprint_id", None)
+        if not callable(resolver):
+            return grounded
+
+        sprint_id = await resolver(product)
+        if not sprint_id:
+            return grounded
+
+        live_slots = dict(grounded.slots)
+        live_slots["product"] = product
+        live_slots["sprint_id"] = sprint_id
+        live_slots.pop("sprint_raw", None)
+        canonical = grounded.canonical_query.replace("{sprint_id}", sprint_id)
+        clarifications = [item for item in grounded.clarifications if item.field != "sprint_id"]
+
+        return SemanticFrame(
+            canonical_query=canonical,
+            intent_hint=grounded.intent_hint,
+            slots=live_slots,
+            clarifications=clarifications,
+            confidence=grounded.confidence,
+            llm_used=grounded.llm_used,
+        )

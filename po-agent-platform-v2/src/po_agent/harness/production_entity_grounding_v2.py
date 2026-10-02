@@ -1,0 +1,397 @@
+"""Production entity grounding v2.
+
+The semantic model proposes human-level constraints; this layer turns them into
+source-backed canonical values. A requested constraint is never silently removed:
+if grounding cannot prove it, execution must stop for clarification.
+"""
+from __future__ import annotations
+
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from po_agent.domain.models import TaskStatus
+
+from .dialogue_runtime import ClarificationNeed, SemanticFrame
+from .live_entity_grounding import LiveGroundedEntityResolver
+
+
+def _configured_product_spaces() -> set[str]:
+    """Load product/space codes from products.yaml.
+
+    Community distribution treats product spaces as deployment configuration,
+    never as an Agent Core constant. A restart is required after config changes.
+    """
+    configured = os.getenv("PRODUCTS_CONFIG_PATH")
+    candidates = [
+        Path(configured).expanduser() if configured else None,
+        Path(os.getcwd()) / "task-api" / "config" / "products.yaml",
+        Path(os.getcwd()).parent / "task-api" / "config" / "products.yaml",
+    ]
+    for path in candidates:
+        if path is None or not path.exists():
+            continue
+        with path.open("r", encoding="utf-8") as stream:
+            data = yaml.safe_load(stream) or {}
+        products = data.get("products") if isinstance(data, dict) else None
+        if isinstance(products, dict):
+            return {str(code).strip().upper() for code in products if str(code).strip()}
+    return set()
+
+
+APPROVED_PRODUCT_SPACES = frozenset(_configured_product_spaces())
+
+
+def _tokens(value: str) -> tuple[str, ...]:
+    return tuple(x.casefold() for x in re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", value) if len(x) > 1)
+
+
+def _token_match(wanted: tuple[str, ...], candidate: str) -> bool:
+    hay = _tokens(candidate)
+    return bool(wanted) and all(any(h == w or h.startswith(w) or w.startswith(h) for h in hay) for w in wanted)
+
+
+class ProductionEntityResolverV2(LiveGroundedEntityResolver):
+    _OPEN_STATUS_TERMS = {"open", "opened", "открыт", "открыта"}
+    _NOT_COMPLETED_TERMS = {
+        "open_tasks", "not_completed", "unresolved", "active", "открытые",
+        "незакрытые", "незавершенные", "незавершённые",
+    }
+    _COMPLETED_TERMS = {
+        "completed", "closed_tasks", "resolved_or_closed", "done", "закрытые",
+        "завершенные", "завершённые", "closed/resolved", "closed+resolved",
+    }
+    _PERSON_RAW_ALIASES = (
+        "person", "person_name", "member", "member_name", "assignee_raw",
+        "assignee_name", "employee", "user",
+    )
+    _GENERIC_SEMANTIC_CLARIFICATION_FIELDS = frozenset({
+        "filter", "filters", "constraint", "constraints", "semantic_filter",
+        "semantic_filters", "query_filters",
+    })
+
+    async def semantic_context(self) -> dict[str, Any]:
+        context = await super().semantic_context()
+        tasks = await self.adapter.search_tasks("", max_results=getattr(self.adapter, "_scan_limit", 10000))
+        identities: list[dict[str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        known_assignees = {str(value) for value in context.get("known_assignees", []) if value}
+
+        # TeamDirectory is an authoritative configured identity source and is
+        # populated even when the legacy bulk /tasks endpoint is empty in
+        # production task-api mode. Seed it first, then enrich with live tasks.
+        for member in context.get("team_members", []):
+            if not isinstance(member, dict):
+                continue
+            display = str(member.get("full_name") or "").strip()
+            login = str(member.get("login") or "").strip()
+            external_id = login
+            key = (display, login, external_id)
+            if not login or key in seen:
+                continue
+            seen.add(key)
+            identities.append({"display_name": display, "login": login, "external_id": external_id})
+            known_assignees.update(value for value in key if value)
+
+        # Product-space validity is a configuration/source-contract fact, not a
+        # property of whether the current task scan happens to contain tasks in
+        # that space. Seed globally approved spaces and enrich them with any
+        # additional source-observed spaces.
+        known_products = set(APPROVED_PRODUCT_SPACES)
+        known_products.update(str(task.project_space).upper() for task in tasks if task.project_space)
+
+        for task in tasks:
+            display = str(task.assignee or "").strip()
+            login = str(task.assignee_login or "").strip()
+            external_id = str(task.assignee_id or "").strip()
+            key = (display, login, external_id)
+            if not any(key) or key in seen:
+                continue
+            seen.add(key)
+            identities.append({"display_name": display, "login": login, "external_id": external_id})
+            known_assignees.update(value for value in key if value)
+        context["known_assignees"] = sorted(known_assignees)
+        context["assignee_identities"] = identities
+        context["known_products"] = sorted(known_products)
+        context["known_statuses"] = sorted({
+            *[str(value) for value in context.get("known_statuses", []) if value],
+            *[status.value for status in TaskStatus],
+        })
+        return context
+
+    @staticmethod
+    def _dedupe_needs(items: list[ClarificationNeed]) -> list[ClarificationNeed]:
+        out: list[ClarificationNeed] = []
+        seen: set[str] = set()
+        for item in items:
+            if item.field in seen:
+                continue
+            seen.add(item.field)
+            out.append(item)
+        return out
+
+    @staticmethod
+    def _query_requests_open_task_set(query: str) -> bool:
+        text = query.casefold()
+        return any(marker in text for marker in (
+            "открытые", "открытых", "незакрытые", "незаверш",
+            "open tasks", "unresolved tasks", "not completed",
+        ))
+
+    @classmethod
+    def _normalize_status_constraint(cls, slots: dict[str, str], original_query: str) -> None:
+        raw = str(slots.get("status_raw") or "").strip()
+        status = str(slots.get("status") or "").strip()
+        semantic = str(slots.get("status_semantic") or "").strip()
+        values = {value.casefold() for value in (raw, status, semantic) if value}
+        if any(value in cls._COMPLETED_TERMS or "/" in value and {"closed", "resolved"} <= set(re.split(r"[/+\s]+", value)) for value in values):
+            slots["status"] = "completed"
+            slots.pop("status_semantic", None)
+            return
+        if any(value in cls._NOT_COMPLETED_TERMS for value in values):
+            slots["status"] = "not_completed"
+            slots.pop("status_semantic", None)
+            return
+        if not status and any(value in cls._OPEN_STATUS_TERMS for value in values):
+            slots["status"] = "not_completed" if cls._query_requests_open_task_set(original_query) else "Open"
+            slots.pop("status_semantic", None)
+
+    @classmethod
+    def _normalize_person_slots(cls, slots: dict[str, str]) -> None:
+        if not slots.get("person_raw"):
+            for alias in cls._PERSON_RAW_ALIASES:
+                value = slots.get(alias)
+                if value:
+                    slots["person_raw"] = value
+                    break
+        assignee = slots.get("assignee")
+        if assignee and not slots.get("member_login") and not slots.get("person_raw"):
+            slots["person_raw"] = assignee
+
+    @staticmethod
+    def _query_mentions_identity(original_query: str, identity: dict[str, str]) -> bool:
+        query_tokens = _tokens(original_query)
+        if not query_tokens:
+            return False
+        candidate = " ".join(str(identity.get(key) or "") for key in ("display_name", "login", "external_id"))
+        identity_tokens = tuple(token for token in _tokens(candidate) if len(token) >= 4)
+        return any(
+            q == candidate_token or q.startswith(candidate_token) or candidate_token.startswith(q)
+            for q in query_tokens
+            for candidate_token in identity_tokens
+        )
+
+    @classmethod
+    def _query_explicit_space(cls, original_query: str) -> str | None:
+        tokens = {token.upper() for token in re.findall(r"\b[A-Za-zА-Яа-я0-9_-]+\b", original_query)}
+        matches = sorted(tokens & APPROVED_PRODUCT_SPACES)
+        return matches[0] if len(matches) == 1 else None
+
+    @classmethod
+    def _material_query_constraints_are_grounded(
+        cls,
+        *,
+        slots: dict[str, str],
+        final_slots: dict[str, str],
+        original_query: str,
+    ) -> bool:
+        """Return True only when every material constraint visible to this layer is proven.
+
+        This is used solely to reconcile stale *generic* LLM clarification messages.
+        It never invents an entity, status or space. If the query explicitly asks for
+        a dimension and grounding has not produced its canonical value, clarification
+        remains fail-closed.
+        """
+        person_requested = bool(slots.get("person_raw") or slots.get("member_login"))
+        if person_requested and not final_slots.get("member_login"):
+            return False
+
+        product_requested = bool(slots.get("product")) or cls._query_explicit_space(original_query) is not None
+        if product_requested and not final_slots.get("product"):
+            return False
+
+        status_requested = bool(
+            slots.get("status") or slots.get("status_raw") or slots.get("status_semantic")
+            or cls._query_requests_open_task_set(original_query)
+        )
+        if status_requested and not final_slots.get("status"):
+            return False
+
+        for field in ("sprint_id", "release_id", "task_key"):
+            if slots.get(field) and not final_slots.get(field):
+                return False
+        return True
+
+    @classmethod
+    def _reconcile_grounded_clarifications(
+        cls,
+        needs: list[ClarificationNeed],
+        *,
+        slots: dict[str, str],
+        final_slots: dict[str, str],
+        original_query: str,
+    ) -> list[ClarificationNeed]:
+        """Drop only clarification needs made obsolete by authoritative grounding.
+
+        LLM semantic pre-pass is advisory in H1B. It may ask a generic "clarify the
+        filters" question before the deterministic grounding layer has resolved a
+        full name/space/status. Once those exact constraints are source-backed, that
+        earlier generic uncertainty is stale and must not suppress execution.
+        Specific unresolved needs remain intact.
+        """
+        reconciled: list[ClarificationNeed] = []
+        all_material_grounded = cls._material_query_constraints_are_grounded(
+            slots=slots,
+            final_slots=final_slots,
+            original_query=original_query,
+        )
+        for need in needs:
+            field = str(need.field or "").strip().casefold()
+            if field in {"member_login", "person", "person_raw", "assignee"} and final_slots.get("member_login"):
+                continue
+            if field in {"product", "space"} and final_slots.get("product"):
+                continue
+            if field in {"status", "status_raw", "status_semantic"} and final_slots.get("status"):
+                continue
+            if field in cls._GENERIC_SEMANTIC_CLARIFICATION_FIELDS and all_material_grounded:
+                continue
+            reconciled.append(need)
+        return reconciled
+
+    async def _infer_missing_person_from_query(self, frame: SemanticFrame, slots: dict[str, str], original_query: str) -> None:
+        """Recover one uniquely source-backed identity when the semantic LLM omitted it.
+
+        This is entity annotation only, never intent/capability routing. The recovery
+        may run even when the semantic pre-pass returned an empty intent, because H1B
+        already controls whether the request is in the task vertical. A value is bound
+        only when the user's wording matches exactly one source/configured identity;
+        zero or multiple matches remain fail-closed downstream.
+        """
+        if slots.get("member_login") or slots.get("person_raw") or any(slots.get(alias) for alias in self._PERSON_RAW_ALIASES):
+            return
+        context = await self.semantic_context()
+        matches = [
+            identity
+            for identity in context.get("assignee_identities", [])
+            if isinstance(identity, dict) and self._query_mentions_identity(original_query, identity)
+        ]
+        unique = {
+            (
+                str(item.get("display_name") or ""),
+                str(item.get("login") or ""),
+                str(item.get("external_id") or ""),
+            )
+            for item in matches
+        }
+        if len(unique) == 1:
+            display, login, external_id = next(iter(unique))
+            slots["person_raw"] = display or login or external_id
+
+    async def _ground_person_login(self, slots: dict[str, str]) -> None:
+        person_raw = str(slots.get("person_raw") or "").strip()
+        if not person_raw:
+            return
+        configured = self.team.resolve_person(person_raw)
+        if len(configured) == 1:
+            slots["member_login"] = configured[0].login
+            return
+        if configured:
+            slots.pop("member_login", None)
+            return
+        context = await self.semantic_context()
+        wanted = _tokens(person_raw)
+        matches: list[dict[str, str]] = []
+        for identity in context.get("assignee_identities", []):
+            hay = " ".join(str(identity.get(k) or "") for k in ("display_name", "login", "external_id"))
+            if _token_match(wanted, hay):
+                matches.append(identity)
+        unique = {(m.get("display_name", ""), m.get("login", ""), m.get("external_id", "")) for m in matches}
+        if len(unique) == 1:
+            display, login, external_id = next(iter(unique))
+            slots["member_login"] = login or external_id or display
+        else:
+            slots.pop("member_login", None)
+
+    async def ground(self, frame: SemanticFrame, original_query: str) -> SemanticFrame:
+        requested_slots = dict(frame.slots)
+        slots = dict(frame.slots)
+        if slots.get("status_raw") and not slots.get("status") and not slots.get("status_semantic"):
+            slots["status"] = slots["status_raw"]
+        self._normalize_person_slots(slots)
+        await self._infer_missing_person_from_query(frame, slots, original_query)
+        self._normalize_status_constraint(slots, original_query)
+        await self._ground_person_login(slots)
+
+        enriched = SemanticFrame(
+            canonical_query=frame.canonical_query,
+            intent_hint=frame.intent_hint,
+            slots=slots,
+            clarifications=list(frame.clarifications),
+            confidence=frame.confidence,
+            llm_used=frame.llm_used,
+        )
+        grounded = await super().ground(enriched, original_query)
+        final_slots = dict(grounded.slots)
+        needs = list(grounded.clarifications)
+        context = await self.semantic_context()
+
+        if final_slots.get("member_login"):
+            final_slots["assignee"] = final_slots["member_login"]
+
+        requested_product = requested_slots.get("product")
+        if requested_product:
+            wanted = requested_product.strip().upper()
+            products = [str(x).upper() for x in context.get("known_products", [])]
+            canonical_product = next((x for x in products if x.casefold() == wanted.casefold()), None)
+            if canonical_product:
+                final_slots["product"] = canonical_product
+            else:
+                final_slots.pop("product", None)
+                needs.append(ClarificationNeed(
+                    "product",
+                    f"Не могу подтвердить пространство/продукт «{requested_product}» по данным AS21. Что выбрать?",
+                    tuple(products),
+                ))
+
+        requested_person = next((requested_slots.get(key) for key in ("person_raw", *self._PERSON_RAW_ALIASES, "assignee") if requested_slots.get(key)), None)
+        if not requested_person and slots.get("person_raw"):
+            requested_person = slots.get("person_raw")
+        if requested_person and not final_slots.get("member_login"):
+            needs.append(ClarificationNeed(
+                "member_login",
+                f"Не удалось однозначно подтвердить исполнителя «{requested_person}».",
+                tuple(str(x) for x in context.get("known_assignees", [])),
+            ))
+        if requested_slots.get("sprint_id") and not final_slots.get("sprint_id"):
+            needs.append(ClarificationNeed(
+                "sprint_id",
+                f"Не удалось подтвердить спринт «{requested_slots['sprint_id']}».",
+                tuple(str(x) for x in context.get("known_sprints", [])),
+            ))
+        if (requested_slots.get("status") or requested_slots.get("status_raw") or requested_slots.get("status_semantic")) and not (
+            final_slots.get("status") or any(n.field == "status" for n in needs)
+        ):
+            needs.append(ClarificationNeed(
+                "status",
+                f"Не удалось однозначно подтвердить условие статуса «{requested_slots.get('status') or requested_slots.get('status_raw') or requested_slots.get('status_semantic')}».",
+                tuple(str(x) for x in context.get("known_statuses", [])),
+            ))
+
+        needs = self._reconcile_grounded_clarifications(
+            needs,
+            slots=slots,
+            final_slots=final_slots,
+            original_query=original_query,
+        )
+
+        return SemanticFrame(
+            canonical_query=grounded.canonical_query,
+            intent_hint=grounded.intent_hint,
+            slots=final_slots,
+            clarifications=self._dedupe_needs(needs),
+            confidence=grounded.confidence,
+            llm_used=grounded.llm_used,
+        )

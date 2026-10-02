@@ -1,0 +1,310 @@
+"""A188-certified V4 catalog expressed as a declarative built-in plugin.
+
+Business behavior intentionally mirrors the pre-plugin runtime. Source handlers
+are attached through the plugin registry so task/source evolution does not require
+editing Agent Core or planner/runtime orchestration.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from ..agent_core_v4 import CapabilitySpecV4, SkillSpecV4, V4CapabilityUnavailable, V4NeedsClarification
+from ..production_entity_grounding_v2 import APPROVED_PRODUCT_SPACES
+from ..agent_core_v4_completion import CompletionRequirement
+from ..contracts import CapabilityResult, Evidence
+from ..v4_plugin_registry import CapabilityBindingV4, UIContractV4, V4SkillPlugin
+from po_agent.domain.models import TaskStatus, normalize_task_status
+from ._task_live_handlers import build_task_lookup
+
+def build_task_search(runtime: Any):
+    """Plugin-owned task-search adapter with two bounded guarantees.
+
+    1. Localized IN_PROGRESS literals are normalized at the plugin seam.
+    2. Sprint-only searches read the authoritative sprint corpus exactly once.
+
+    The second rule removes an avoidable duplicate in the stable Core handler
+    without editing Agent Core itself. All other argument combinations delegate
+    unchanged to the certified Core implementation.
+    """
+    async def execute(args: dict[str, str]) -> CapabilityResult:
+        forwarded = dict(args)
+        raw_status = str(forwarded.get("status") or "").strip()
+        if raw_status and normalize_task_status(raw_status) == TaskStatus.IN_PROGRESS:
+            forwarded["status"] = TaskStatus.IN_PROGRESS.value
+
+        assignee = str(forwarded.get("assignee") or "").strip()
+        sprint_id = str(forwarded.get("sprint_id") or "").strip().upper()
+        space = str(forwarded.get("space") or "").strip().upper()
+        if not sprint_id or assignee:
+            return await runtime._task_search(forwarded)
+
+        if space and space not in APPROVED_PRODUCT_SPACES:
+            raise V4NeedsClarification(f"Пространство «{space}» не подтверждено.")
+
+        status = runtime._safe_status(forwarded.get("status") or "")
+        unassigned = str(forwarded.get("unassigned") or "").strip().casefold() in {
+            "1", "true", "yes", "y",
+        }
+
+        tasks = list(await runtime.adapter.get_sprint_tasks(sprint_id, space or None))
+
+        if space:
+            tasks = [
+                task for task in tasks
+                if str(getattr(task, "project_space", "") or "").casefold() == space.casefold()
+            ]
+
+        if unassigned:
+            tasks = [
+                task for task in tasks
+                if not any(
+                    str(value or "").strip()
+                    for value in (
+                        getattr(task, "assignee", None),
+                        getattr(task, "assignee_login", None),
+                        getattr(task, "assignee_id", None),
+                    )
+                )
+            ]
+
+        if status == "not_completed":
+            tasks = [task for task in tasks if task.is_open]
+        elif status == "completed":
+            tasks = [task for task in tasks if task.is_completed]
+        elif status == "blocked":
+            tasks = [task for task in tasks if task.is_blocked]
+        elif status:
+            requested = status.casefold().strip()
+            tasks = [
+                task for task in tasks
+                if requested in str(getattr(task, "status_raw", "") or "").casefold()
+                or requested in str(getattr(task, "status_type", "") or "").casefold()
+                or requested in task.status.value.casefold()
+                or requested in task.status_category.value.casefold()
+            ]
+
+        filters = {
+            key: value
+            for key, value in {
+                "space": space,
+                "sprint_id": sprint_id,
+                "status": status,
+                "unassigned": unassigned or None,
+            }.items()
+            if value
+        }
+        rows = [runtime._task_to_dict(task) for task in tasks]
+        return CapabilityResult(
+            answer=f"Найдено задач: {len(rows)}.",
+            data={
+                "count": len(rows),
+                "filters": filters,
+                "tasks": rows,
+                "task_keys": [row["key"] for row in rows],
+                "source": "REAL_AS21",
+            },
+            evidence=[
+                Evidence(
+                    type="task",
+                    source="as21",
+                    entity_id=row["key"],
+                    label=row["title"],
+                    value=row["status"],
+                )
+                for row in rows
+            ],
+        )
+
+    return execute
+
+
+def build_release_health(runtime: Any):
+    """Bounded, source-backed release health.
+
+    Release membership is read only through the adapter's space-scoped live
+    task-query path. An empty membership cannot currently be distinguished from
+    an unpopulated SWTR release-link field, so it fails closed instead of
+    reporting a fabricated 0/0 healthy release.
+    """
+    async def execute(args: dict[str, str]) -> CapabilityResult:
+        release_id = str(args.get("release_id") or "").strip()
+        space = str(args.get("space") or "").strip().upper()
+        if not release_id:
+            raise V4NeedsClarification("Укажите релиз.")
+        if not space:
+            raise V4NeedsClarification("Укажите продукт/пространство релиза.")
+
+        tasks = list(await runtime.adapter.get_release_tasks(release_id, space))
+        if not tasks:
+            raise V4CapabilityUnavailable(
+                "release.health requires authoritative release-to-task membership; "
+                "the current REAL AS21 task source does not expose populated release linkage"
+            )
+
+        total = len(tasks)
+        completed = sum(1 for task in tasks if task.is_completed)
+        blocked = sum(1 for task in tasks if task.is_blocked)
+        active = sum(1 for task in tasks if task.is_open)
+        completion_percent = round(completed / total * 100.0, 1) if total else 0.0
+        data = {
+            "release_id": release_id,
+            "space": space,
+            "total": total,
+            "completed": completed,
+            "active": active,
+            "blocked": blocked,
+            "completion_percent": completion_percent,
+            "task_keys": [task.key for task in tasks],
+            "source": "REAL_AS21",
+            "membership": "source_backed_release_task_query",
+        }
+        return CapabilityResult(
+            answer=(
+                f"{release_id}: готовность {completion_percent}%, "
+                f"выполнено {completed}/{total}, заблокировано {blocked}."
+            ),
+            data=data,
+            evidence=[
+                Evidence(
+                    type="release_task",
+                    source="as21",
+                    entity_id=task.key,
+                    label=task.title,
+                    value=task.status_raw or task.status.value,
+                )
+                for task in tasks
+            ],
+        )
+
+    return execute
+
+
+CAPABILITIES = (
+    CapabilitySpecV4("member.resolve", "Resolve a human reference against REAL AS21, optionally inside a source-backed sprint/space context when global identity search is ambiguous.", {"reference": "required raw human reference", "sprint_id": "optional sprint id or prior sprint.resolve observation", "space": "optional approved product space"}),
+    CapabilitySpecV4("space.resolve", "Validate an approved product space.", {"reference": "required space text"}),
+    CapabilitySpecV4("sprint.resolve", "Validate a sprint id against REAL AS21 and return canonical id/space.", {"reference": "required sprint id", "space": "optional canonical space"}),
+    CapabilitySpecV4("sprint.search", "Resolve a human period reference (month/year/period) to source-backed sprint(s) in a space; typed ambiguity if several match.", {"space": "required approved space", "period": "required human period reference, e.g. a month name or YYYY-MM"}),
+    CapabilitySpecV4("sprint.list", "List source-backed sprints in a space (optionally only active ones) as a complete collection.", {"space": "required approved space", "active_only": "optional 'true' to keep only non-closed sprints"}),
+    CapabilitySpecV4("release.resolve", "Validate a release/version id against REAL AS21 tasks.", {"reference": "required release id", "space": "optional canonical space"}),
+    CapabilitySpecV4("task.search", "Search REAL AS21 tasks by any resolved assignee/space/sprint/status/unassigned combination.", {"assignee": "optional canonical login from member.resolve", "space": "optional approved space", "sprint_id": "optional canonical sprint", "status": "optional status; supports not_completed, completed, blocked, or an authoritative source status label", "unassigned": "optional true only when user explicitly asks for tasks without an assignee"}),
+    CapabilitySpecV4("task.lookup", "Read one REAL AS21 task by key, including live attachment metadata and canonical assignee identity.", {"task_key": "required task key"}),
+    CapabilitySpecV4("task.summary", "Summarize one REAL AS21 task.", {"task_key": "required task key"}),
+    CapabilitySpecV4("task.quality", "Analyze one task's formulation quality.", {"task_key": "required task key"}),
+    CapabilitySpecV4("task.acceptance", "Analyze acceptance criteria/testability for one task.", {"task_key": "required task key"}),
+    CapabilitySpecV4("task.blockers", "Analyze blockers/dependencies for one task.", {"task_key": "required task key"}),
+    CapabilitySpecV4("sprint.health", "Calculate current sprint health from REAL AS21 sprint tasks.", {"sprint_id": "required canonical sprint id"}),
+    CapabilitySpecV4("sprint.current", "Read the current sprint for a product space.", {"product": "required approved space"}),
+    CapabilitySpecV4(
+        "release.health",
+        "Calculate release progress only from bounded, source-backed release membership.",
+        {"release_id": "required source-backed release id", "space": "required canonical product space"},
+    ),
+)
+
+SKILLS = (
+    SkillSpecV4(
+        "tasks.search",
+        "Compose task search when the request has multiple structured filters, a current/period sprint, or another multi-step constraint combination. Text/phrase searches, including phrase + named-person scope, belong to the dedicated task.search_text skill.",
+        (
+            "Use this composition helper when several structured constraints or current/period sprint resolution must be combined. Do not use it for text/phrase search: task.search_text owns phrase + optional natural-person/space scope in one governed capability.",
+            "Resolve only the entities needed by the user's filters.",
+            "For a human reference call member.resolve.",
+            "For a sprint given by id call sprint.resolve; for a sprint given by a month/period call sprint.search.",
+            "For 'current sprint' call sprint.current to obtain the canonical sprint id before searching.",
+            "Call task.search with every resolved user constraint and validate the returned collection. Preserve explicit source status names verbatim in status; use status=blocked for blocked-task requests so the same canonical blocked predicate as sprint health/risk logic is used. For an explicit request for tasks without an assignee, pass unassigned=true; never return the unfiltered collection as a successful substitute.",
+        ),
+        ("member.resolve", "space.resolve", "sprint.resolve", "sprint.search", "sprint.current", "task.search"),
+        completion=(CompletionRequirement("task.search", data_keys=("count",), covers_resolved_constraints=True),),
+    ),
+    SkillSpecV4(
+        "sprints.discover",
+        "Resolve sprint identity by a human month/period reference in a product space. Identity-only helper: it must not terminate health, task-list or analytics requests.",
+        (
+            "Validate the product space, then call sprint.search with the space and the period reference.",
+            "If sprint.search returns typed ambiguity, surface the options instead of guessing.",
+            "For a request whose deliverable is health, tasks, statuses or analytics, continue by loading the matching skill after sprint identity is resolved; do not treat sprint identity as the final deliverable.",
+        ),
+        ("space.resolve", "sprint.search"),
+        completion=(),
+    ),
+    SkillSpecV4(
+        "sprints.list",
+        "List the sprints (or the active sprints) of a product space as a complete collection.",
+        (
+            "Validate the product space, then call sprint.list for the full source-backed collection.",
+            "Do not answer a request for several/active sprints with sprint.current, which returns only one sprint.",
+        ),
+        ("space.resolve", "sprint.list"),
+        completion=(CompletionRequirement("sprint.list", data_keys=("sprints",)),),
+    ),
+    SkillSpecV4(
+        "tasks.lookup_then_assignee",
+        "Read a task and then inspect tasks of its assignee.",
+        (
+            "Call task.lookup for the user-supplied task key.",
+            "Use the authoritative assignee from the observation, never infer a person from prose.",
+            "Call task.search for that assignee and preserve any additional user filters.",
+        ),
+        ("task.lookup", "task.search"),
+        completion=(
+            CompletionRequirement("task.lookup", data_keys=("task", "assignee_login")),
+            CompletionRequirement(
+                "task.search",
+                data_keys=("count",),
+                bound_argument=("assignee", "task.lookup", ("assignee_login", "task.assignee_login", "assignee_id", "task.assignee_id")),
+                covers_resolved_constraints=True,
+            ),
+        ),
+    ),
+    SkillSpecV4("task.lookup", "Read one task by key.", ("Call task.lookup with the literal task key.",), ("task.lookup",), completion=(CompletionRequirement("task.lookup", data_keys=("task",)),)),
+    SkillSpecV4("task.summary", "Explain/summarize one task.", ("Call task.summary with the literal task key.",), ("task.summary",), completion=(CompletionRequirement("task.summary", data_keys=("task_key",), data_absent_keys=("found",)),)),
+    SkillSpecV4("task.quality", "Assess task statement quality/completeness.", ("Call task.quality with the literal task key.",), ("task.quality",), completion=(CompletionRequirement("task.quality", data_keys=("task_key",), data_absent_keys=("found",)),)),
+    SkillSpecV4("task.acceptance", "Assess acceptance criteria/testability of a task.", ("Call task.acceptance with the literal task key.",), ("task.acceptance",), completion=(CompletionRequirement("task.acceptance", data_keys=("task_key",), data_absent_keys=("found",)),)),
+    SkillSpecV4("task.blockers", "Inspect blockers/dependencies of a task.", ("Call task.blockers with the literal task key.",), ("task.blockers",), completion=(CompletionRequirement("task.blockers", data_keys=("task_key",), data_absent_keys=("found",)),)),
+    SkillSpecV4("sprint.health", "Show actual health/progress metrics of a sprint; sprint identity alone is not a health result.", ("Resolve/validate the sprint if needed, then call sprint.health. Never answer a health request from sprint.search/sprint.current alone.",), ("sprint.resolve", "sprint.health"), completion=(CompletionRequirement("sprint.health", data_keys=("sprint_id", "total")),)),
+    SkillSpecV4("sprint.current", "Report which sprint is currently active in a product space (identity only; use tasks.search to list tasks within it).", ("Validate the product space, then call sprint.current.",), ("space.resolve", "sprint.current"), completion=()),
+    SkillSpecV4(
+        "release.health",
+        "Show actual release health/progress only when authoritative release-to-task membership is source-backed.",
+        (
+            "Resolve/validate the product space first.",
+            "Use release.search with require_single=true to obtain the authoritative release id from the live version directory; never bind a product name as a release id.",
+            "Call release.health with both the resolved release_id and space.",
+            "If REAL AS21 does not expose populated release-to-task membership, fail closed as SOURCE_CONDITIONAL; never report 0/0 and never use a tenant-wide task scan.",
+        ),
+        ("space.resolve", "release.search", "release.health"),
+        completion=(CompletionRequirement("release.health", data_keys=("release_id", "total")),),
+    ),
+)
+
+BINDINGS = (
+    CapabilityBindingV4("member.resolve", handler_method="_member_resolve"),
+    CapabilityBindingV4("space.resolve", handler_method="_space_resolve"),
+    CapabilityBindingV4("sprint.resolve", handler_method="_sprint_resolve"),
+    CapabilityBindingV4("sprint.search", handler_method="_sprint_search"),
+    CapabilityBindingV4("sprint.list", handler_method="_sprint_list"),
+    CapabilityBindingV4("release.resolve", handler_method="_release_resolve"),
+    CapabilityBindingV4("task.search", handler_builder=build_task_search),
+    CapabilityBindingV4("task.lookup", handler_builder=build_task_lookup),
+    CapabilityBindingV4("task.summary", legacy_capability_id="task.summary"),
+    CapabilityBindingV4("task.quality", legacy_capability_id="task.quality"),
+    CapabilityBindingV4("task.acceptance", legacy_capability_id="task.acceptance_analysis"),
+    CapabilityBindingV4("task.blockers", legacy_capability_id="task.blockers"),
+    CapabilityBindingV4("sprint.health", legacy_capability_id="sprint.health"),
+    CapabilityBindingV4("sprint.current", handler_method="_sprint_current_source_backed"),
+    CapabilityBindingV4("release.health", handler_builder=build_release_health),
+)
+
+UI = {
+    "tasks.search": UIContractV4("task_collection", preferred_widget="task_table", required_fields=("count", "tasks")),
+    "tasks.lookup_then_assignee": UIContractV4("task_collection", preferred_widget="task_table", required_fields=("count", "tasks")),
+    "sprints.list": UIContractV4("sprint_collection", preferred_widget="sprint_list", required_fields=("sprints",)),
+    "sprints.discover": UIContractV4("sprint", preferred_widget="sprint_summary", required_fields=("sprint_id",)),
+    "task.lookup": UIContractV4("task", preferred_widget="task_detail", required_fields=("task",)),
+    "task.quality": UIContractV4("analysis", preferred_widget="task_analysis", required_fields=("task_key", "score")),
+    "sprint.current": UIContractV4("sprint", preferred_widget="sprint_summary"),
+    "sprint.health": UIContractV4("analysis", preferred_widget="sprint_health"),
+    "release.health": UIContractV4("analysis", preferred_widget="release_health"),
+}
+
+PLUGIN = V4SkillPlugin(plugin_id="builtin.core.a188", skills=SKILLS, capabilities=CAPABILITIES, bindings=BINDINGS, ui=UI)

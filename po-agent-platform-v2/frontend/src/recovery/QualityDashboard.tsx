@@ -1,0 +1,148 @@
+import { FormEvent, useMemo, useState } from 'react'
+import { useOutletContext } from 'react-router-dom'
+import { HarnessQueryResponse } from '../api/client'
+import { ResultStatePanel } from '../components/ResultStatePanel'
+import { classifyResult, getCapabilityData, stateAllowsBusinessData } from './resultState'
+import { SnapshotRefresh, useSessionState, useSnapshotHarness } from './pageSnapshot'
+
+const PRODUCT_LABELS = String(import.meta.env.VITE_PRODUCT_LABELS || 'PRD1,PRD2')
+  .split(',')
+  .map((value: string) => value.trim())
+  .filter(Boolean)
+const DEFAULT_SPACE = PRODUCT_LABELS[0] || 'PRD1'
+const DEFAULT_TASK_KEY = `${DEFAULT_SPACE}-101`
+
+type WorkspaceContext = { openAgent(): void }
+type Row = Record<string, unknown>
+
+function Meta({ result }: { result: HarnessQueryResponse | null }) {
+  return <div className="filter-status"><span>Skill: {result?.skill?.id ?? '—'}</span><span>Evidence: {result?.evidence.length ?? 0}</span><span>Trace: {result?.trace_id?.slice(0, 8) ?? '—'}</span></div>
+}
+
+function Metric({ label, value, hint }: { label: string; value: string | number; hint?: string }) {
+  return <div className="metric-card"><span>{label}</span><strong>{value}</strong>{hint && <small>{hint}</small>}</div>
+}
+
+export function QualityDashboard() {
+  const { openAgent } = useOutletContext<WorkspaceContext>()
+  const [taskKey, setTaskKey] = useSessionState('quality.taskKey', DEFAULT_TASK_KEY)
+  const [submitted, setSubmitted] = useSessionState('quality.submitted', DEFAULT_TASK_KEY)
+  const [agingDays, setAgingDays] = useSessionState('quality.agingDays', '7')
+  const [agingSubmitted, setAgingSubmitted] = useSessionState('quality.agingSubmitted', '7')
+  const [agingSpace, setAgingSpace] = useSessionState('quality.agingSpace', DEFAULT_SPACE)
+  const [agingSpaceSubmitted, setAgingSpaceSubmitted] = useSessionState('quality.agingSpaceSubmitted', DEFAULT_SPACE)
+  const [taskRefreshNonce, setTaskRefreshNonce] = useState(0)
+  const [agingRefreshNonce, setAgingRefreshNonce] = useState(0)
+
+  const qualityQ = useSnapshotHarness('quality:' + submitted, `Оцени постановку ${submitted}`, taskRefreshNonce)
+  const missingQ = useSnapshotHarness('quality:' + submitted, `Чего не хватает в задаче ${submitted}`, taskRefreshNonce)
+  const acceptanceQ = useSnapshotHarness('quality:' + submitted, `Покажи критерии приемки ${submitted}`, taskRefreshNonce)
+  const agingQ = useSnapshotHarness('quality-aging:' + agingSpaceSubmitted + ':' + agingSubmitted, `Покажи старые задачи команды ${agingSpaceSubmitted} старше ${agingSubmitted} дней`, agingRefreshNonce)
+  const quality = qualityQ.result
+  const missing = missingQ.result
+  const acceptance = acceptanceQ.result
+  const aging = agingQ.result
+
+  const qd = getCapabilityData(quality) as Row
+  const md = getCapabilityData(missing) as { missing_elements?: string[]; issues?: string[]; recommendations?: string[]; quality_score?: number }
+  const ad = getCapabilityData(acceptance) as { score?: number; criteria?: string[]; testable_criteria?: string[]; gaps?: string[] }
+  const gd = getCapabilityData(aging) as { threshold_days?: number; count?: number; tasks?: Row[] }
+
+  const qualityState = classifyResult(quality)
+  const missingState = classifyResult(missing)
+  const acceptanceState = classifyResult(acceptance)
+  const agingState = classifyResult(aging)
+  const qualityReady = stateAllowsBusinessData(qualityState)
+  const missingReady = stateAllowsBusinessData(missingState)
+  const acceptanceReady = stateAllowsBusinessData(acceptanceState)
+  const decisionReady = qualityReady && missingReady && acceptanceReady
+
+  const rawScore = qualityReady ? Number(qd.score ?? md.quality_score) : NaN
+  const rawAcceptanceScore = acceptanceReady ? Number(ad.score) : NaN
+  const score = Number.isFinite(rawScore) ? rawScore : null
+  const acceptanceScore = Number.isFinite(rawAcceptanceScore) ? rawAcceptanceScore : null
+  const missingCount = missingReady ? (md.missing_elements?.length ?? 0) : null
+  const decisionHasScores = decisionReady && score != null && acceptanceScore != null && missingCount != null
+  const returnForRework = decisionHasScores && (score < 70 || acceptanceScore < 70 || missingCount > 0)
+  const decisionLabel = !decisionHasScores ? 'Ожидание данных' : returnForRework ? 'Вернуть на доработку' : 'Можно брать в работу'
+  const decisionTone = !decisionHasScores ? 'status-pill' : returnForRework ? 'attention-badge' : 'green-badge'
+
+  const reasons = useMemo(() => {
+    const rows: string[] = []
+    if (!decisionHasScores) return rows
+    if ((score ?? 0) < 70) rows.push(`Quality score ${score}/100`)
+    if ((acceptanceScore ?? 0) < 70) rows.push(`Acceptance ${acceptanceScore}/100`)
+    if (missingCount) rows.push(`Пробелов: ${missingCount}`)
+    return rows
+  }, [score, acceptanceScore, missingCount, decisionHasScores])
+
+  function submitTask(event: FormEvent) {
+    event.preventDefault()
+    const next = taskKey.trim().toUpperCase()
+    if (!next) return
+    if (next === submitted) setTaskRefreshNonce(value => value + 1)
+    else setSubmitted(next)
+  }
+
+  function submitAging(event: FormEvent) {
+    event.preventDefault()
+    const parsed = Math.max(1, Number.parseInt(agingDays, 10) || 7)
+    const nextDays = String(parsed)
+    const sameCriteria = nextDays === agingSubmitted && agingSpace === agingSpaceSubmitted
+    setAgingDays(nextDays)
+    setAgingSubmitted(nextDays)
+    setAgingSpaceSubmitted(agingSpace)
+    if (sameCriteria) setAgingRefreshNonce(value => value + 1)
+  }
+
+  return <section className="page page-quality">
+    <div className="page-heading"><div><h1>Качество</h1><p>Качество постановки, критерии приёмки, пробелы и team-scoped aging</p></div><div className="page-heading-actions"><SnapshotRefresh updatedAt={[qualityQ.updatedAt, missingQ.updatedAt, acceptanceQ.updatedAt]} refreshing={qualityQ.refreshing || missingQ.refreshing || acceptanceQ.refreshing} refreshError={qualityQ.refreshError || missingQ.refreshError || acceptanceQ.refreshError} onRefresh={() => setTaskRefreshNonce(value => value + 1)} /><button className="primary-button" onClick={openAgent}>Спросить PO Agent</button></div></div>
+
+    <form className="panel entity-toolbar" onSubmit={submitTask}>
+      <div><span>Задача</span><input value={taskKey} onChange={e => setTaskKey(e.target.value)} placeholder={DEFAULT_TASK_KEY} /></div>
+      <button type="submit">Проверить</button>
+    </form>
+
+    <div className="metric-grid">
+      <Metric label="Quality score" value={score == null ? '—' : `${score}/100`} hint={qualityReady ? (String(qd.quality_level ?? '') || undefined) : undefined} />
+      <Metric label="Acceptance" value={acceptanceScore == null ? '—' : `${acceptanceScore}/100`} hint={acceptanceReady ? `${ad.testable_criteria?.length ?? 0} проверяемых условий` : undefined} />
+      <Metric label="Пробелы" value={missingCount == null ? '—' : missingCount} hint={missingReady ? 'missing requirements' : undefined} />
+      <Metric label="Решение PO" value={!decisionHasScores ? 'NOT RUN' : returnForRework ? 'REWORK' : 'READY'} hint={decisionLabel} />
+    </div>
+
+    <div className="quality-decision panel">
+      <div><span className={decisionTone}>{decisionLabel}</span><strong>{submitted}</strong></div>
+      {decisionHasScores
+        ? <p>{reasons.length ? reasons.join(' · ') : 'Детерминированные проверки не выявили блокирующих пробелов в постановке.'}</p>
+        : <ResultStatePanel result={!qualityReady ? quality : !missingReady ? missing : acceptance} compact />}
+      <Meta result={quality} />
+    </div>
+
+    <div className="quality-grid">
+      <div className="panel">
+        <div className="panel-title"><strong>Что нужно уточнить</strong><span>{missingCount == null ? '—' : missingCount}</span></div>
+        {missingReady ? (md.missing_elements?.length ? md.missing_elements.map(item => <div className="quality-item" key={item}><b>{item}</b></div>) : <div className="muted">Источник подтвердил: критичных пробелов не найдено.</div>) : <ResultStatePanel result={missing} compact />}
+        {md.recommendations?.length ? <div className="recommendation-box">{md.recommendations.map(item => <div key={item}>→ {item}</div>)}</div> : null}
+        <Meta result={missing} />
+      </div>
+
+      <div className="panel">
+        <div className="panel-title"><strong>Acceptance / Testability</strong><span>{acceptanceScore == null ? '—' : `${acceptanceScore}/100`}</span></div>
+        {acceptanceReady ? (ad.criteria?.length ? ad.criteria.map((item, index) => <div className="quality-item" key={`${item}-${index}`}><b>{item}</b><span>{ad.testable_criteria?.includes(item) ? 'TESTABLE' : 'NEEDS CLARITY'}</span></div>) : <div className="muted">Источник подтвердил: явные критерии приёмки не найдены.</div>) : <ResultStatePanel result={acceptance} compact />}
+        {ad.gaps?.length ? <div className="warning-box">{ad.gaps.map(item => <div key={item}>⚠ {item}</div>)}</div> : null}
+        <Meta result={acceptance} />
+      </div>
+    </div>
+
+    <div className="panel aging-panel">
+      <div className="panel-title"><strong>Aging queue</strong><span>{stateAllowsBusinessData(agingState) ? (gd.count ?? '—') : '—'}</span></div>
+      <form className="aging-toolbar" onSubmit={submitAging}>
+        <label>Пространство <select value={agingSpace} onChange={e => setAgingSpace(e.target.value)}>{PRODUCT_LABELS.map(product => <option key={product} value={product}>{product}</option>)}</select></label>
+        <label>Старше <input value={agingDays} onChange={e => setAgingDays(e.target.value)} inputMode="numeric" /> дней</label>
+        <button type="submit">Обновить</button>
+      </form>
+      {stateAllowsBusinessData(agingState) ? (gd.tasks?.length ? gd.tasks.map(task => <div className="task-row" key={String(task.key)}><div className="task-key">{String(task.key)}</div><div className="task-main"><b>{String(task.title ?? '')}</b><span>{String(task.assignee ?? 'Не назначен')} · {String(task.status ?? '')}</span></div><div className="attention-badge">{String(task.age_days ?? '')} дн.</div></div>) : <div className="muted">Источник подтвердил: задач старше выбранного порога нет.</div>) : <ResultStatePanel result={aging} compact />}
+      <Meta result={aging} />
+    </div>
+  </section>
+}

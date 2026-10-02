@@ -1,0 +1,196 @@
+"""Canonical domain models for PO Agent Platform v2.
+
+Transport-independent domain entities. AS21-specific parsing belongs in adapters;
+canonical fields contain only facts that deterministic capabilities may consume.
+"""
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Optional
+from pydantic import BaseModel, Field
+
+class TaskKey(str): pass
+class SprintId(str): pass
+class ReleaseId(str): pass
+class MemberId(str): pass
+
+def task_key_schema(): return {"type":"string","pattern":r"^[A-Z]+-\d+$"}
+def sprint_id_schema(): return {"type":"string","pattern":r"^[A-Z]+-SPRNT-\d+$"}
+def release_id_schema(): return {"type":"string","pattern":r"^[A-Z]+-\d{4}-[A-Z]+\d*$"}
+def member_id_schema(): return {"type":"string","pattern":r"^[A-Z]+\.[A-Z]+\.[A-Z]+$"}
+
+def _now_for(value: datetime) -> datetime:
+    """Return a current datetime compatible with the supplied canonical timestamp."""
+    return datetime.now(tz=value.tzinfo) if value.tzinfo is not None else datetime.now()
+
+class Timestamp(BaseModel):
+    value: datetime
+    timezone: Optional[str]=None
+
+class StatusCategory(str,Enum):
+    BACKLOG="backlog"; WAITING="waiting"; ACTIVE_WORK="active_work"; REVIEW_QUEUE="review_queue"; REVIEW="review"; QA_QUEUE="qa_queue"; TESTING="testing"; COMPLETED_PENDING="completed_pending"; COMPLETED="completed"; CANCELLED="cancelled"; UNKNOWN="unknown"
+class TaskStatus(str,Enum):
+    UNKNOWN="Unknown"; OPEN="Open"; NEED_INFO="Need info"; IN_PROGRESS="In progress"; READY_FOR_REVIEW="Ready for review"; IN_REVIEW="In review"; READY_FOR_QA="Ready for QA"; QA="QA"; REOPENED="Reopened"; RESOLVED="Resolved"; CLOSED="Closed"; CANCELLED="Cancelled"
+
+# Authoritative workflow status categories exposed by the source
+# (``workflow_status.statusType``). Terminal categories mark finished work;
+# active categories are non-terminal (including explicitly paused work).
+# A category outside both sets is left to name-based classification and is
+# never silently treated as open.
+TERMINAL_STATUS_TYPES = frozenset({
+    "done", "closed", "cancelled", "finished", "resolved", "completed", "complete",
+})
+NONTERMINAL_STATUS_TYPES = frozenset({
+    "open", "todo", "backlog", "registered", "progress", "in_progress", "active",
+    "pause", "paused", "waiting", "blocked", "need_info", "reopened",
+    "qa", "testing", "review", "in_review", "ready_for_review", "ready_for_qa",
+})
+_NONTERMINAL_TASK_STATUSES = frozenset({
+    TaskStatus.OPEN, TaskStatus.IN_PROGRESS, TaskStatus.NEED_INFO,
+    TaskStatus.READY_FOR_REVIEW, TaskStatus.IN_REVIEW, TaskStatus.READY_FOR_QA,
+    TaskStatus.QA, TaskStatus.REOPENED,
+})
+class StatusTransition(BaseModel):
+    from_status: TaskStatus
+    to_status: TaskStatus
+    timestamp: datetime
+    author: Optional[str] = None
+    transition_type: Optional[str] = None
+    # Preserve authoritative source labels independently from the normalized
+    # TaskStatus enum. The enum is useful for generic logic, but source
+    # workflows may contain arbitrary/custom status names that must not be
+    # rendered as "Unknown" in history/timeline output.
+    from_name: Optional[str] = None
+    to_name: Optional[str] = None
+
+    @property
+    def display_from_status(self) -> str:
+        return self.from_name or self.from_status.value
+
+    @property
+    def display_to_status(self) -> str:
+        return self.to_name or self.to_status.value
+class AttachmentType(str,Enum):
+    EXCEL="excel"; WORD="word"; PDF="pdf"; MSG="msg"; IMAGE="image"; TEXT="text"; OTHER="other"
+class Attachment(BaseModel):
+    id:str; name:str; type:AttachmentType; size_bytes:int; created_at:datetime; url:Optional[str]=None; description:Optional[str]=None
+class TaskPriority(str,Enum):
+    LOW="Low"; MEDIUM="Medium"; HIGH="High"; URGENT="Urgent"; CRITICAL="Critical"
+
+class Task(BaseModel):
+    key:str=Field(...,pattern=r"^[A-Z]+-\d+$"); id:str
+    # AS21 is authoritative for task titles. Valid source tasks may exceed 200 chars;
+    # presentation layers may truncate, but the canonical model must preserve source facts.
+    title:str=Field(...,min_length=1); description:Optional[str]=None
+    status:TaskStatus; status_category:StatusCategory; status_raw:Optional[str]=None; status_type:Optional[str]=None; status_transitions:list[StatusTransition]=[]
+    assignee:Optional[str]=None; assignee_id:Optional[str]=None; assignee_login:Optional[str]=None
+    created_at:datetime; updated_at:datetime; due_date:Optional[datetime]=None; resolved_at:Optional[datetime]=None; closed_at:Optional[datetime]=None
+    priority:Optional[TaskPriority]=None; estimate_hours:Optional[float]=None; time_spent_hours:Optional[float]=None
+    project_space:Optional[str]=None; sprint_id:Optional[str]=None; release_id:Optional[str]=None; parent_key:Optional[str]=None; depends_on:list[str]=[]
+    labels:list[str]=[]; components:list[str]=[]; attachments:list[Attachment]=[]
+    source:str="swtr"; source_url:Optional[str]=None; source_data:dict[str,Any]=Field(default_factory=dict,repr=False)
+    @property
+    def _status_type_category(self) -> int:
+        """0 = terminal, 1 = active, 2 = undecodable by status type."""
+        if self.status_type:
+            t = self.status_type.casefold().strip()
+            if t in TERMINAL_STATUS_TYPES:
+                return 0
+            if t in NONTERMINAL_STATUS_TYPES:
+                return 1
+        return 2
+    @property
+    def is_completed(self):
+        category = self._status_type_category
+        if category == 0:
+            return True
+        if category == 1:
+            return False
+        return self.status in (TaskStatus.RESOLVED,TaskStatus.CLOSED,TaskStatus.CANCELLED)
+    @property
+    def is_open(self):
+        """Explicitly non-terminal (active or paused) work.
+
+        Undecodable statuses are NOT open: an unknown status must never
+        inflate an open/not_completed factual collection.
+        """
+        category = self._status_type_category
+        if category == 0:
+            return False
+        if category == 1:
+            return True
+        return self.status in _NONTERMINAL_TASK_STATUSES
+    @property
+    def is_blocked(self): return self.status==TaskStatus.NEED_INFO
+    @property
+    def age_days(self): return (_now_for(self.created_at)-self.created_at).days
+    @property
+    def time_in_current_status_hours(self):
+        if not self.status_transitions: return 0.0
+        timestamp=self.status_transitions[-1].timestamp
+        return (_now_for(timestamp)-timestamp).total_seconds()/3600
+    @property
+    def cycle_time_hours(self):
+        start=next((t.timestamp for t in self.status_transitions if t.to_status==TaskStatus.IN_PROGRESS),self.created_at); end=self.resolved_at or self.closed_at or _now_for(start); return (end-start).total_seconds()/3600
+    @property
+    def lead_time_hours(self):
+        end=self.resolved_at or self.closed_at or _now_for(self.created_at); return (end-self.created_at).total_seconds()/3600
+
+class SprintState(str,Enum): FUTURE="future"; ACTIVE="active"; CLOSED="closed"
+class Sprint(BaseModel):
+    id:str=Field(...,pattern=r"^[A-Z]+-SPRNT-\d+$"); name:str; space:str; start_date:datetime; end_date:datetime; created_at:datetime; closed_at:Optional[datetime]=None; state:SprintState; committed_tasks:list[str]=[]; completed_tasks:list[str]=[]; description:Optional[str]=None; goal:Optional[str]=None; velocity_target:Optional[int]=None
+    @property
+    def duration_days(self): return (self.end_date-self.start_date).days
+    @property
+    def is_current(self):
+        now=_now_for(self.start_date); return self.start_date<=now<=self.end_date and self.state==SprintState.ACTIVE
+    @property
+    def is_past(self): return self.state==SprintState.CLOSED
+    @property
+    def is_upcoming(self): return _now_for(self.start_date)<self.start_date and self.state==SprintState.FUTURE
+
+class ReleaseState(str,Enum): PLANNED="planned"; IN_PROGRESS="in_progress"; READY_FOR_TESTING="ready_for_testing"; RELEASED="released"; CANCELLED="cancelled"
+class Release(BaseModel):
+    id:str=Field(...,pattern=r"^[A-Z]+-\d{4}-[A-Z]+\d*$"); name:str; space:str; target_date:Optional[datetime]=None; created_at:datetime; released_at:Optional[datetime]=None; state:ReleaseState; scheduled_tasks:list[str]=[]; completed_tasks:list[str]=[]; blocked_tasks:list[str]=[]; linked_sprints:list[str]=[]; description:Optional[str]=None; version:Optional[str]=None; epic:Optional[str]=None
+    @property
+    def completion_ratio(self): return 1.0 if not self.scheduled_tasks else len(self.completed_tasks)/len(self.scheduled_tasks)
+    @property
+    def is_on_track(self): return False if self.state==ReleaseState.CANCELLED else True if self.state==ReleaseState.RELEASED else self.completion_ratio>=0.8
+
+class TeamRole(str,Enum):
+    PRODUCT_OWNER="Владелец продукта"; TECH_LEAD="Лидер продукта"; DEVELOPER="Участник команды"; QA="Участник команды"; ANALYST="Участник команды"; ARCHITECT="Участник команды"; OTHER="Участник команды"
+class Competency(BaseModel):
+    name:str; level:int=Field(ge=1,le=10); years_experience:Optional[int]=None; evidence:Optional[str]=None
+class TeamMember(BaseModel):
+    id:str; full_name:str; email:Optional[str]=None; grade:Optional[int]=None; team_role:TeamRole; products:list[str]=[]; competencies:dict[str,Competency]={}; allocation_percent:Optional[float]=Field(None,ge=0,le=100); recommended_max_wip:Optional[int]=None; is_active:bool=True; planned_absences:list[datetime]=[]
+    @property
+    def primary_product(self): return self.products[0] if self.products else None
+    @property
+    def total_competency_level(self): return sum(c.level for c in self.competencies.values())
+
+class DependencyType(str,Enum): BLOCKING="blocking"; BLOCKED_BY="blocked_by"; RELATED="related"; DUPLICATE="duplicate"
+class Dependency(BaseModel):
+    task_key:str=Field(...,pattern=r"^[A-Z]+-\d+$"); depends_on:str=Field(...,pattern=r"^[A-Z]+-\d+$"); type:DependencyType; description:Optional[str]=None; resolved_at:Optional[datetime]=None
+    @property
+    def is_blocking(self): return self.type==DependencyType.BLOCKING
+
+def normalize_task_status(raw_status:str)->TaskStatus:
+    status_map={
+        "open":TaskStatus.OPEN,"открыта":TaskStatus.OPEN,
+        "todo":TaskStatus.OPEN,"backlog":TaskStatus.OPEN,
+        "registered":TaskStatus.OPEN,"зарегистрирован":TaskStatus.OPEN,"зарегистрирована":TaskStatus.OPEN,
+        "need info":TaskStatus.NEED_INFO,"требуется информация":TaskStatus.NEED_INFO,
+        "in progress":TaskStatus.IN_PROGRESS,"in_progress":TaskStatus.IN_PROGRESS,"в работе":TaskStatus.IN_PROGRESS,
+        "ready for review":TaskStatus.READY_FOR_REVIEW,"готово к ревью":TaskStatus.READY_FOR_REVIEW,
+        "in review":TaskStatus.IN_REVIEW,"на ревью":TaskStatus.IN_REVIEW,
+        "ready for qa":TaskStatus.READY_FOR_QA,"готово к qa":TaskStatus.READY_FOR_QA,
+        "qa":TaskStatus.QA,"тестирование":TaskStatus.QA,
+        "reopened":TaskStatus.REOPENED,"переоткрыта":TaskStatus.REOPENED,
+        "resolved":TaskStatus.RESOLVED,"решена":TaskStatus.RESOLVED,
+        "closed":TaskStatus.CLOSED,"закрыта":TaskStatus.CLOSED,
+        "done":TaskStatus.CLOSED,"completed":TaskStatus.CLOSED,"finished":TaskStatus.CLOSED,
+        "cancelled":TaskStatus.CANCELLED,"отменена":TaskStatus.CANCELLED,
+    }
+    return status_map.get((raw_status or "").lower().strip(),TaskStatus.UNKNOWN)
+
+def get_status_category(status:TaskStatus)->StatusCategory:
+    return {TaskStatus.OPEN:StatusCategory.BACKLOG,TaskStatus.NEED_INFO:StatusCategory.WAITING,TaskStatus.IN_PROGRESS:StatusCategory.ACTIVE_WORK,TaskStatus.READY_FOR_REVIEW:StatusCategory.REVIEW_QUEUE,TaskStatus.IN_REVIEW:StatusCategory.REVIEW,TaskStatus.READY_FOR_QA:StatusCategory.QA_QUEUE,TaskStatus.QA:StatusCategory.TESTING,TaskStatus.REOPENED:StatusCategory.ACTIVE_WORK,TaskStatus.RESOLVED:StatusCategory.COMPLETED_PENDING,TaskStatus.CLOSED:StatusCategory.COMPLETED,TaskStatus.CANCELLED:StatusCategory.CANCELLED,TaskStatus.UNKNOWN:StatusCategory.UNKNOWN}.get(status,StatusCategory.UNKNOWN)

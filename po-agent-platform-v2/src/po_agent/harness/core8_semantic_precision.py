@@ -1,0 +1,193 @@
+"""Narrow deterministic normalization for high-precision Core-8 utterances.
+
+This wrapper never invents source identifiers. It only corrects an already
+supported semantic operation when the original wording explicitly names a
+Core-8 operation and preserves raw/current source slots for normal grounding.
+"""
+from __future__ import annotations
+
+import re
+from typing import Any
+
+from .dialogue_runtime import ClarificationNeed, SemanticFrame, SemanticInterpreter
+from .production_entity_grounding_v2 import APPROVED_PRODUCT_SPACES
+
+
+class Core8SemanticPrecisionInterpreter:
+    """Protect explicit Core-8 operation wording from provider misclassification."""
+
+    _CURRENT = ("текущ", "актуальн", "current", "active")
+    _SPRINT = ("спринт", "sprint")
+    _HEALTH = ("здоров", "готовност", "health", "readiness")
+    _VELOCITY = ("velocity", "велосит", "скорост", "производительност")
+    _SPRINT_ID_RE = re.compile(r"\b[A-ZА-Я][A-ZА-Я0-9_]{1,15}-SPRNT-\d+\b", re.I)
+    # Do not match the SPRNT-1 suffix inside PRD1-SPRNT-1 as a task key.
+    _TASK_ID_RE = re.compile(r"(?<!-)\b[A-ZА-Я][A-ZА-Я0-9_]{1,15}-\d+(?![-A-ZА-Я0-9_])\b", re.I)
+    _TASK_WORD_RE = re.compile(r"\b(?:задач(?:а|и|у|е|ей|ам|ами|ах)?|task|tasks)\b", re.I)
+    # Natural Russian ownership/assignee wording is common in PO queries:
+    # "задачи Иванова", "задачи Ивана Иванова", "что у Иванова в работе".
+    # Preserve the raw human mention for source-backed entity grounding instead
+    # of requiring artificial wording such as "исполнитель Иванов".
+    _TASK_PERSON_RE = re.compile(
+        r"\bзадач(?:а|и|у|е|ей|ам|ами|ах)?\s+"
+        r"([А-ЯЁ][а-яё-]+(?:\s+[А-ЯЁ][а-яё-]+){0,2})\b"
+    )
+    _OWNERSHIP_PERSON_RE = re.compile(
+        r"\bу\s+([А-ЯЁ][а-яё-]+(?:\s+[А-ЯЁ][а-яё-]+){0,2})\b"
+    )
+    _PRODUCT_MARKERS: dict[str, tuple[str, ...]] = {}
+
+    def __init__(self, delegate: SemanticInterpreter) -> None:
+        self.delegate = delegate
+
+    @staticmethod
+    def _contains(text: str, markers: tuple[str, ...]) -> bool:
+        return any(marker in text for marker in markers)
+
+    @classmethod
+    def _products(cls, query: str) -> tuple[str, ...]:
+        low = query.casefold()
+        found: list[str] = []
+        # Community mode treats configured product codes as deployment data.
+        # Match only explicit configured codes here; aliases are resolved later
+        # by the source/config grounding layer.
+        tokens = {token.upper() for token in re.findall(r"\b[A-Za-zА-Яа-я0-9_-]+\b", query)}
+        found.extend(sorted(tokens & set(APPROVED_PRODUCT_SPACES)))
+        return tuple(found)
+
+    @classmethod
+    def _product(cls, query: str) -> str | None:
+        products = cls._products(query)
+        return products[0] if len(products) == 1 else None
+
+    @classmethod
+    def _explicit_sprint_ids(cls, query: str) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(match.group(0).upper() for match in cls._SPRINT_ID_RE.finditer(query)))
+
+    @classmethod
+    def _natural_person_raw(cls, query: str) -> str | None:
+        for pattern in (cls._TASK_PERSON_RE, cls._OWNERSHIP_PERSON_RE):
+            match = pattern.search(query)
+            if match:
+                return " ".join(match.group(1).split())
+        return None
+
+    @classmethod
+    def _contradictory_sprint_filters(cls, query: str) -> tuple[str, ...]:
+        explicit = cls._explicit_sprint_ids(query)
+        low = query.casefold()
+        relative_current = cls._contains(low, cls._SPRINT) and cls._contains(low, cls._CURRENT)
+        if len(explicit) > 1:
+            return explicit
+        if explicit and relative_current:
+            return ("current", *explicit)
+        return ()
+
+    @classmethod
+    def _explicit_product_scope(cls, query: str) -> bool:
+        low = query.casefold()
+        # Product is an independent task filter only when wording explicitly
+        # frames it as product/space scope. Product codes themselves come from
+        # deployment configuration, not from this semantic wrapper.
+        if not cls._products(query):
+            return False
+        return bool(re.search(r"\b(?:по|продукт(?:е|а|у)?|пространств(?:е|а|у|о)?)\b", low, re.I))
+
+    async def interpret(self, query: str, *, context: dict[str, Any] | None = None) -> SemanticFrame:
+        frame = await self.delegate.interpret(query, context=context)
+        low = query.casefold()
+        mentions_sprint = self._contains(low, self._SPRINT)
+        asks_current = mentions_sprint and self._contains(low, self._CURRENT)
+        slots = dict(frame.slots)
+        intent = frame.intent_hint
+        canonical = frame.canonical_query
+
+        contradictions = self._contradictory_sprint_filters(query)
+        if contradictions:
+            slots.pop("sprint_id", None)
+            slots.pop("sprint_raw", None)
+            other = [item for item in frame.clarifications if item.field != "sprint_id"]
+            other.append(ClarificationNeed(
+                "sprint_id",
+                "В запросе указаны несовместимые фильтры спринта. Какой один спринт использовать?",
+                contradictions,
+            ))
+            return SemanticFrame(canonical, intent, slots, other, frame.confidence, frame.llm_used)
+
+        if mentions_sprint and self._contains(low, self._HEALTH):
+            intent = "sprint_health"
+        elif mentions_sprint and self._contains(low, self._VELOCITY):
+            intent = "sprint_velocity"
+        elif asks_current and self._contains(low, ("какой", "what")):
+            intent = "sprint_current"
+
+        # Explicit source sprint IDs are atomic identifiers. The provider may
+        # incorrectly shorten PRD1-SPRNT-1 to SPRNT-1 or even classify it as a
+        # task key. Preserve the exact raw identifier here; the grounder still
+        # validates it against source-backed evidence before execution.
+        explicit_sprints = self._explicit_sprint_ids(query)
+        if len(explicit_sprints) == 1:
+            sprint_id = explicit_sprints[0]
+            slots["sprint_id"] = sprint_id
+            slots.pop("sprint_raw", None)
+            if "{sprint_id}" in canonical:
+                canonical = canonical.replace("{sprint_id}", sprint_id)
+
+            # Remove provider hallucination caused by parsing the SPRNT-1
+            # suffix as a task entity. A genuine explicit task key elsewhere
+            # in the query is preserved by the robust task-key regex below.
+            explicit_task_keys = tuple(dict.fromkeys(match.group(0).upper() for match in self._TASK_ID_RE.finditer(query)))
+            if not explicit_task_keys:
+                slots.pop("task_key", None)
+                slots.pop("task_id", None)
+                slots.pop("issue_key", None)
+
+            if self._TASK_WORD_RE.search(query) and intent in {None, "task_lookup", "task_by_id", "task_details", "task_detail"}:
+                intent = "task_search"
+
+        # Preserve natural-language person ownership for normal live entity
+        # grounding. Never overwrite an explicit provider/source-backed person.
+        if not any(slots.get(name) for name in ("person_raw", "person", "assignee", "assignee_raw", "assignee_id")):
+            natural_person = self._natural_person_raw(query)
+            if natural_person:
+                slots["person_raw"] = natural_person
+
+        # Normalize a legacy/provider alias only when the original utterance has
+        # exactly one explicit task key and is plainly asking to show/open it.
+        task_keys = tuple(dict.fromkeys(match.group(0).upper() for match in self._TASK_ID_RE.finditer(query)))
+        if len(task_keys) == 1 and intent in {"task_by_id", "task_details", "task_detail"}:
+            intent = "task_lookup"
+            slots.setdefault("task_key", task_keys[0])
+
+        products = self._products(query)
+        product = products[0] if len(products) == 1 else None
+        clarifications = list(frame.clarifications)
+
+        if explicit_sprints and not task_keys:
+            clarifications = [item for item in clarifications if item.field not in {"task_key", "task_id", "issue_key"}]
+
+        if len(products) > 1 and (mentions_sprint or "задач" in low or "task" in low or "tasks" in low):
+            slots.pop("product", None)
+            clarifications = [item for item in clarifications if item.field != "product"]
+            clarifications.append(ClarificationNeed(
+                "product",
+                "В запросе указано несколько продуктов/пространств. Какой один использовать?",
+                products,
+            ))
+        elif product and (asks_current or self._explicit_product_scope(query)):
+            slots["product"] = product
+
+        if asks_current:
+            slots["sprint_raw"] = "current"
+
+        if asks_current and product:
+            clarifications = [item for item in clarifications if item.field != "sprint_id"]
+
+        return SemanticFrame(
+            canonical_query=canonical,
+            intent_hint=intent,
+            slots=slots,
+            clarifications=clarifications,
+            confidence=frame.confidence,
+            llm_used=frame.llm_used,
+        )
