@@ -1,0 +1,70 @@
+name: Community CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sanitize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pre-publish scan
+        run: python3 scripts/prepublish_scan.py
+
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Agent
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e './po-agent-platform-v2[dev]'
+      - name: Compile Agent
+        run: python -m compileall -q po-agent-platform-v2/src/po_agent
+      - name: Import Agent app
+        env:
+          AS21_MODE: fake
+          AGENT_CORE_V4_ENABLED: "true"
+          LLM_API_KEY: ""
+        run: |
+          python - <<'PY'
+          from po_agent.main import app
+          print(app.title)
+          PY
+      - name: Install Task API
+        run: pip install -r task-api/requirements.txt
+      - name: Import read-only Task API
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "task-api")
+          import main
+          paths = {route.path for route in main.app.routes}
+          forbidden = {"/api/v1/tasks", "/api/v1/swtr-sync"}
+          assert not (paths & forbidden), paths & forbidden
+          print(main.app.title)
+          PY
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: po-agent-platform-v2/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: po-agent-platform-v2/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
