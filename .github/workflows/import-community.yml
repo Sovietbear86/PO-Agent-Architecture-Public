@@ -30,9 +30,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          find . -mindepth 1 -maxdepth 1 ! -name '.git' ! -name '_source' -exec rm -rf {} +
-          rsync -a --delete --exclude='.git' _source/ ./
-          rm -rf _source
+          SNAPSHOT="${RUNNER_TEMP}/po-agent-community-snapshot"
+          rm -rf "${SNAPSHOT}"
+          mkdir -p "${SNAPSHOT}"
+          rsync -a --exclude='.git' _source/ "${SNAPSHOT}/"
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          rsync -a "${SNAPSHOT}/" ./
           rm -rf .github/workflows/import-community.yml || true
 
       - name: Pre-publish sanitization scan
