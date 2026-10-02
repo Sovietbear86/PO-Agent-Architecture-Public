@@ -48,7 +48,7 @@ jobs:
           import sys
           sys.path.insert(0, "task-api")
           import main
-          paths = {route.path for route in main.app.routes}
+          paths = {getattr(route, "path", None) for route in main.app.routes}
           forbidden = {"/api/v1/tasks", "/api/v1/swtr-sync"}
           assert not (paths & forbidden), paths & forbidden
           print(main.app.title)
