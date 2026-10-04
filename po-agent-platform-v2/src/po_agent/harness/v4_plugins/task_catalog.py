@@ -129,6 +129,16 @@ CAPABILITIES = (
             "created_period": "required raw user period wording, e.g. 'последние 2 дня' or 'с 29.09.2026 по 01.10.2026'",
             "reference": "optional natural person reference resolved source-backed inside the capability",
             "space": "optional grounded product space",
+            "status": "optional requested task status/open-completed-in-progress semantic state preserved from the user request",
+        },
+    ),
+    CapabilitySpecV4(
+        "task.search_created_in_progress",
+        "Find REAL AS21 tasks created during a bounded calendar period and currently in the canonical in-progress semantic state. The status is fixed by the plugin binding; the planner supplies only period/person/space constraints.",
+        {
+            "created_period": "required raw user period wording, e.g. 'последние 5 дней' or an explicit inclusive date range",
+            "reference": "optional natural person reference resolved source-backed inside the capability",
+            "space": "optional grounded product space",
         },
     ),
     CapabilitySpecV4(
@@ -188,11 +198,24 @@ SKILLS = (
         (
             "Call task.search_created when the user constrains tasks by creation time/date.",
             "Pass created_period as the raw user wording exactly; do not invent ISO dates in the planner.",
-            "Preserve any grounded person reference and/or product space.",
-            "The capability owns date parsing and filters only source-backed created_at; missing source timestamps fail closed rather than becoming false exclusions.",
+            "Preserve any grounded person reference, product space, and explicitly requested task status. For open/completed + created-period, call this single capability with both created_period and status. For explicit in-progress + created-period, prefer the dedicated task.search_created_in_progress skill/capability whose canonical status is fixed by plugin metadata; do not split the request across separate status and created-period capabilities.",
+            "Treat recency wording as a creation-time constraint, not as a workflow-state constraint. When created_period already captures recency, do not add any workflow status unless the user explicitly names a task/workflow state.",
+            "The capability owns date parsing and typed status filtering; it filters only source-backed created_at and missing source timestamps fail closed rather than becoming false exclusions.",
         ),
         ("task.search_created",),
         completion=(CompletionRequirement("task.search_created", data_keys=("count", "created_from", "created_to")),),
+    ),
+    SkillSpecV4(
+        "task.search_created_in_progress",
+        "Find tasks created during a period that are explicitly requested as in progress / in work.",
+        (
+            "Use this skill when the user explicitly combines a creation period with the in-progress semantic state (for example 'в работе' + 'за последние N дней').",
+            "Call task.search_created_in_progress with the raw created_period and any grounded person reference/product space.",
+            "Do not pass a status argument: canonical in-progress status is fixed by the plugin contract.",
+            "The capability owns source-backed date filtering and typed in-progress filtering; REAL_EMPTY is valid only after the bounded source corpus is checked.",
+        ),
+        ("task.search_created_in_progress",),
+        completion=(CompletionRequirement("task.search_created_in_progress", data_keys=("count", "created_from", "created_to")),),
     ),
     SkillSpecV4(
         "task.search_status", "Find tasks by a requested task status/open-completed semantic state.",
@@ -230,6 +253,11 @@ BINDINGS = (
     CapabilityBindingV4("task.search_msg", handler_builder=build_task_search_attachments, fixed_arguments={"attachment_type": "msg"}),
     CapabilityBindingV4("task.search_assignee", handler_builder=build_task_search_assignee),
     CapabilityBindingV4("task.search_created", handler_builder=build_task_search_created),
+    CapabilityBindingV4(
+        "task.search_created_in_progress",
+        handler_builder=build_task_search_created,
+        fixed_arguments={"status": "in_progress"},
+    ),
     CapabilityBindingV4("task.search_status", handler_builder=build_task_search_status),
     CapabilityBindingV4("task.search_release", handler_builder=build_task_search_release),
     CapabilityBindingV4("task.missing_requirements", legacy_capability_id="task.missing_requirements"),
@@ -248,6 +276,7 @@ UI = {
     "task.search_msg": UIContractV4("attachment_collection", preferred_widget="attachment_table", required_fields=("count", "results", "attachment_type")),
     "task.search_assignee": UIContractV4("task_collection", preferred_widget="task_table", required_fields=("count", "tasks")),
     "task.search_created": UIContractV4("task_collection", preferred_widget="task_table", required_fields=("count", "tasks", "created_from", "created_to")),
+    "task.search_created_in_progress": UIContractV4("task_collection", preferred_widget="task_table", required_fields=("count", "tasks", "created_from", "created_to")),
     "task.search_status": UIContractV4("task_collection", preferred_widget="task_table", required_fields=("count", "tasks")),
     "task.search_sprint": UIContractV4("task_collection", preferred_widget="task_table", required_fields=("count", "tasks")),
     "task.search_release": UIContractV4("task_collection", preferred_widget="task_table", required_fields=("count", "tasks")),
