@@ -42,14 +42,14 @@ def _response(*rows):
 
 @pytest.mark.asyncio
 async def test_missing_hierarchy_runs_once_and_renders_only_grounded_answers():
-    query = "Покажи задачу DMS-267 и её иерархию"
+    query = "Покажи задачу DEMO-267 и её иерархию"
     original = _response(_obs(
-        "task.lookup", {"task_key": "DMS-267"},
-        key="DMS-267", answer="Карточка DMS-267 подтверждена.",
+        "task.lookup", {"task_key": "DEMO-267"},
+        key="DEMO-267", answer="Карточка DEMO-267 подтверждена.",
     ))
     extra = _response(_obs(
-        "task.hierarchy", {"task_key": "DMS-267"},
-        key="DMS-267", answer="Родитель DMS-253.",
+        "task.hierarchy", {"task_key": "DEMO-267"},
+        key="DEMO-267", answer="Родитель DEMO-253.",
     ))
     runtime = _GovernedRuntime([extra])
     result = await run_bounded_missing_goals(runtime, original, query, "session")
@@ -58,38 +58,38 @@ async def test_missing_hierarchy_runs_once_and_renders_only_grounded_answers():
     assert result.attempted == 1
     assert len(runtime.calls) == 1
     assert "иерархию" in runtime.calls[0].query
-    assert "DMS-253" in result.response["answer"]
-    assert "Карточка DMS-267" in result.response["answer"]
+    assert "DEMO-253" in result.response["answer"]
+    assert "Карточка DEMO-267" in result.response["answer"]
     assert "непроверенный текст" not in result.response["answer"]
     assert len(result.response["data"]["results"]) == 2
 
 
 @pytest.mark.asyncio
 async def test_three_goals_only_run_missing_and_never_exceed_two_extra_calls():
-    query = "Покажи задачу DMS-267, её иерархию и задачи Калачанова в WMB"
+    query = "Покажи задачу DEMO-267, её иерархию и задачи Иванова в DEV"
     original = _response(_obs(
-        "task.lookup", {"task_key": "DMS-267"}, key="DMS-267",
+        "task.lookup", {"task_key": "DEMO-267"}, key="DEMO-267",
     ))
     runtime = _GovernedRuntime([
-        _response(_obs("task.hierarchy", {"task_key": "DMS-267"},
-                       key="DMS-267", answer="Родитель DMS-253")),
+        _response(_obs("task.hierarchy", {"task_key": "DEMO-267"},
+                       key="DEMO-267", answer="Родитель DEMO-253")),
         _response(_obs("task.search_assignee",
-                       {"reference": "Калачанов", "space": "WMB"},
+                       {"reference": "Иванов", "space": "DEV"},
                        answer="Найдено задач: 6")),
     ])
     result = await run_bounded_missing_goals(runtime, original, query, "session")
     assert result.response["status"] == "COMPLETED"
     assert result.attempted == 2
     assert len(runtime.calls) == 2
-    assert all("Покажи задачу DMS-267" != call.query for call in runtime.calls)
+    assert all("Покажи задачу DEMO-267" != call.query for call in runtime.calls)
     assert len(result.proven) == 3
 
 
 @pytest.mark.asyncio
 async def test_429_and_missing_source_do_not_ever_become_false_completed():
-    query = "Покажи задачу DMS-267 и её иерархию"
+    query = "Покажи задачу DEMO-267 и её иерархию"
     original = _response(_obs(
-        "task.lookup", {"task_key": "DMS-267"}, key="DMS-267",
+        "task.lookup", {"task_key": "DEMO-267"}, key="DEMO-267",
     ))
     runtime = _GovernedRuntime([{
         "status": "FAILED", "answer": None, "data": {},
@@ -101,8 +101,8 @@ async def test_429_and_missing_source_do_not_ever_become_false_completed():
     assert result.attempted == 1
 
     runtime = _GovernedRuntime([_response(_obs(
-        "task.hierarchy", {"task_key": "DMS-267"},
-        key="DMS-267", source="LOCAL",
+        "task.hierarchy", {"task_key": "DEMO-267"},
+        key="DEMO-267", source="LOCAL",
     ))])
     result = await run_bounded_missing_goals(runtime, original, query, "session")
     assert result.response["status"] == "PARTIAL"
@@ -112,9 +112,9 @@ async def test_429_and_missing_source_do_not_ever_become_false_completed():
 async def test_composed_filters_and_comparison_are_not_split():
     original = _response()
     for query in (
-        "Открытые задачи Семавина типа дефект в DMS за последние 2 дня",
-        "Задачи в работе и с вложениями у Калачанова в WMB",
-        "Сравни незавершённые задачи в DMS и OLP",
+        "Открытые задачи Петрова типа дефект в DEMO за последние 2 дня",
+        "Задачи в работе и с вложениями у Иванова в DEV",
+        "Сравни незавершённые задачи в DEMO и DEMO",
     ):
         runtime = _GovernedRuntime([])
         result = await run_bounded_missing_goals(runtime, original, query, "s")
@@ -125,17 +125,17 @@ async def test_composed_filters_and_comparison_are_not_split():
 
 @pytest.mark.asyncio
 async def test_prior_evidence_credit_only_and_never_injected_into_public_results():
-    query = "Покажи задачу DMS-267 и её иерархию"
+    query = "Покажи задачу DEMO-267 и её иерархию"
     prior = ({
         "step": 1, "capability_id": "task.lookup",
-        "arguments": {"task_key": "DMS-267"},
-        "answer": "Карточка DMS-267 подтверждена.",
-        "data": {"source": "REAL_AS21", "task_key": "DMS-267"},
+        "arguments": {"task_key": "DEMO-267"},
+        "answer": "Карточка DEMO-267 подтверждена.",
+        "data": {"source": "REAL_AS21", "task_key": "DEMO-267"},
     },)
     current = _response()
     runtime = _GovernedRuntime([_response(_obs(
-        "task.hierarchy", {"task_key": "DMS-267"},
-        key="DMS-267", answer="Родитель DMS-253",
+        "task.hierarchy", {"task_key": "DEMO-267"},
+        key="DEMO-267", answer="Родитель DEMO-253",
     ))])
     result = await run_bounded_missing_goals(
         runtime, current, query, "session", prior=prior,
@@ -144,20 +144,20 @@ async def test_prior_evidence_credit_only_and_never_injected_into_public_results
     assert len(runtime.calls) == 1
     assert len(result.response["data"]["results"]) == 1
     assert result.response["data"]["results"][0]["capability_id"] == "task.hierarchy"
-    assert "Карточка DMS-267" in result.response["answer"]
+    assert "Карточка DEMO-267" in result.response["answer"]
 
 
 @pytest.mark.asyncio
 async def test_untrusted_prior_cannot_be_credited():
-    query = "Покажи задачу DMS-267 и её иерархию"
+    query = "Покажи задачу DEMO-267 и её иерархию"
     prior = ({
         "step": 1, "capability_id": "task.lookup",
-        "arguments": {"task_key": "DMS-267"},
+        "arguments": {"task_key": "DEMO-267"},
         "answer": "Invented",
-        "data": {"source": "LOCAL", "task_key": "DMS-267"},
+        "data": {"source": "LOCAL", "task_key": "DEMO-267"},
     },)
     runtime = _GovernedRuntime([_response(_obs(
-        "task.hierarchy", {"task_key": "DMS-267"}, key="DMS-267",
+        "task.hierarchy", {"task_key": "DEMO-267"}, key="DEMO-267",
     ))])
     result = await run_bounded_missing_goals(runtime, _response(), query, "s", prior=prior)
     assert result.response["status"] == "PARTIAL"
@@ -165,8 +165,8 @@ async def test_untrusted_prior_cannot_be_credited():
 
 
 def test_goal_query_is_typed_and_does_not_route_by_user_or_task_id():
-    goals = detect_goals("Покажи задачу DMS-267 и её иерархию")
+    goals = detect_goals("Покажи задачу DEMO-267 и её иерархию")
     assert all(_goal_query(goal) for goal in goals)
     assert set(_goal_query(goal) for goal in goals) == {
-        "Покажи задачу DMS-267", "Покажи иерархию задачи DMS-267"
+        "Покажи задачу DEMO-267", "Покажи иерархию задачи DEMO-267"
     }
