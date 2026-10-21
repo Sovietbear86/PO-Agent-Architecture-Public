@@ -94,7 +94,7 @@ class OptionsGenerator:
         Returns:
             List of ClarificationOption
         """
-        return []
+        return OptionsGenerator.from_products(["WMB", "OLP", "DMS", "STS"])
 
     @staticmethod
     def default_sprints() -> List[ClarificationOption]:
@@ -103,7 +103,12 @@ class OptionsGenerator:
         Returns:
             List of ClarificationOption
         """
-        return []
+        return OptionsGenerator.from_sprints([
+            "DMS-SPRNT-1",
+            "OLP-SPRNT-1",
+            "WMB-SPRNT-1",
+            "STS-SPRNT-1",
+        ])
 
 
 # Export for convenience
