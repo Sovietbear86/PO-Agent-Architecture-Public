@@ -33,20 +33,20 @@ async def test_elides_simple_task_collection_after_resolver():
         _obs(
             1,
             "space.resolve",
-            answer="Пространство подтверждено: WMB.",
-            data={"space": "WMB"},
+            answer="Пространство подтверждено: DEV.",
+            data={"space": "DEV"},
         ),
         _obs(
             2,
             "task.search_assignee",
             answer="Найдено задач: 2.",
-            data={"count": 2, "task_keys": ["WMB-1", "WMB-2"], "source": "REAL_AS21"},
+            data={"count": 2, "task_keys": ["DEV-1", "DEV-2"], "source": "REAL_AS21"},
         ),
     ]
 
-    answer = await elider.synthesize("Задачи Калачанова в WMB", observations)
+    answer = await elider.synthesize("Задачи Иванова в DEV", observations)
 
-    assert answer == "Найдено задач: 2.\nКлючи: WMB-1, WMB-2"
+    assert answer == "Найдено задач: 2.\nКлючи: DEV-1, DEV-2"
     assert underlying.calls == 0
 
 
@@ -61,7 +61,7 @@ async def test_elides_task_type_analysis_using_grounded_capability_answer():
             answer="Найдено задач типа «Дефект»: 1.",
             data={
                 "count": 1,
-                "task_keys": ["DMS-431"],
+                "task_keys": ["DEMO-431"],
                 "type_breakdown": [{"code": "bug", "name": "Дефект", "count": 1}],
                 "source": "REAL_AS21",
             },
@@ -80,21 +80,21 @@ async def test_elides_lookup_and_hierarchy_answers():
     elider = TerminalSynthesisElider(underlying)
 
     lookup = await elider.synthesize(
-        "DMS-267",
-        [_obs(1, "task.lookup", answer="DMS-267: Тестовая задача — В работе.", data={"task_key": "DMS-267"})],
+        "DEMO-267",
+        [_obs(1, "task.lookup", answer="DEMO-267: Тестовая задача — В работе.", data={"task_key": "DEMO-267"})],
     )
     hierarchy = await elider.synthesize(
-        "Покажи иерархию DMS-267",
+        "Покажи иерархию DEMO-267",
         [_obs(
             1,
             "task.hierarchy",
-            answer="Для DMS-267: уровней родителей — 2. Эпик: DMS-349.",
-            data={"task_key": "DMS-267", "depth": 2, "epic_key": "DMS-349"},
+            answer="Для DEMO-267: уровней родителей — 2. Эпик: DEMO-349.",
+            data={"task_key": "DEMO-267", "depth": 2, "epic_key": "DEMO-349"},
         )],
     )
 
-    assert lookup == "DMS-267: Тестовая задача — В работе."
-    assert hierarchy == "Для DMS-267: уровней родителей — 2. Эпик: DMS-349."
+    assert lookup == "DEMO-267: Тестовая задача — В работе."
+    assert hierarchy == "Для DEMO-267: уровней родителей — 2. Эпик: DEMO-349."
     assert underlying.calls == 0
 
 
@@ -133,7 +133,7 @@ async def test_delegates_when_terminal_answer_is_empty():
     underlying = _UnderlyingSynthesizer()
     elider = TerminalSynthesisElider(underlying)
     observations = [
-        _obs(1, "task.search", answer="", data={"count": 1, "task_keys": ["DMS-1"]}),
+        _obs(1, "task.search", answer="", data={"count": 1, "task_keys": ["DEMO-1"]}),
     ]
 
     answer = await elider.synthesize("задачи", observations)
@@ -152,15 +152,15 @@ async def test_elision_renders_complete_compacted_key_sample():
         answer="Для исполнителя найдено задач: 2.",
         data={
             "count": 2,
-            "task_keys_sample": ["WMB-1", "WMB-2"],
+            "task_keys_sample": ["DEV-1", "DEV-2"],
             "task_key_count": 2,
             "source": "REAL_AS21",
         },
     )
 
-    answer = await elider.synthesize("Задачи в WMB", [observation])
+    answer = await elider.synthesize("Задачи в DEV", [observation])
 
-    assert answer == "Для исполнителя найдено задач: 2.\nКлючи: WMB-1, WMB-2"
+    assert answer == "Для исполнителя найдено задач: 2.\nКлючи: DEV-1, DEV-2"
     assert underlying.calls == 0
 
 
@@ -174,13 +174,13 @@ async def test_elision_does_not_present_truncated_key_sample_as_complete():
         answer="Найдено задач: 27.",
         data={
             "count": 27,
-            "task_keys_sample": [f"WMB-{i}" for i in range(20)],
+            "task_keys_sample": [f"DEV-{i}" for i in range(20)],
             "task_key_count": 27,
             "source": "REAL_AS21",
         },
     )
 
-    answer = await elider.synthesize("Задачи в WMB", [observation])
+    answer = await elider.synthesize("Задачи в DEV", [observation])
 
     assert answer == "Найдено задач: 27."
     assert "Ключи:" not in answer
@@ -189,9 +189,9 @@ async def test_elision_does_not_present_truncated_key_sample_as_complete():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("query", [
-    "Задачи Калачанова в WMB и задачи Семавина в DMS",
-    "Задачи Калачанова в WMB и иерархию DMS-267",
-    "DMS-267, иерархию, задачи Калачанова в WMB",
+    "Задачи Иванова в DEV и задачи Петрова в DEMO",
+    "Задачи Иванова в DEV и иерархию DEMO-267",
+    "DEMO-267, иерархию, задачи Иванова в DEV",
 ])
 async def test_single_terminal_multi_intent_uses_query_aware_synthesizer(query):
     underlying = _UnderlyingSynthesizer()
@@ -201,7 +201,7 @@ async def test_single_terminal_multi_intent_uses_query_aware_synthesizer(query):
         [_obs(
             1, "task.search_assignee",
             answer="Найдено задач: 6.",
-            data={"count": 6, "task_keys_sample": ["WMB-1"], "task_key_count": 6},
+            data={"count": 6, "task_keys_sample": ["DEV-1"], "task_key_count": 6},
         )],
     )
     assert answer == "LLM synthesis"
@@ -213,9 +213,9 @@ async def test_single_intent_still_skips_llm_synthesis():
     underlying = _UnderlyingSynthesizer()
     elider = TerminalSynthesisElider(underlying)
     answer = await elider.synthesize(
-        "Задачи Калачанова в WMB",
+        "Задачи Иванова в DEV",
         [_obs(1, "task.search_assignee", answer="Найдено задач: 1.",
-              data={"count": 1, "task_keys_sample": ["WMB-1"], "task_key_count": 1})],
+              data={"count": 1, "task_keys_sample": ["DEV-1"], "task_key_count": 1})],
     )
-    assert "WMB-1" in answer
+    assert "DEV-1" in answer
     assert underlying.calls == 0
