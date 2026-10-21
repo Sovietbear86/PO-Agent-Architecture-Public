@@ -100,17 +100,17 @@ class LLMIntentRouter:
         # Few-shot examples for LLM
         self.examples = [
             {
-                "query": "покажи задачи из спринта PRD1-SPRNT-1",
+                "query": "покажи задачи из спринта DMS-SPRNT-1",
                 "intent": "task_search",
                 "entities": [
-                    {"type": "sprint", "value": "PRD1-SPRNT-1"}
+                    {"type": "sprint", "value": "DMS-SPRNT-1"}
                 ],
             },
             {
-                "query": "задачи Иванова в текущем спринте",
+                "query": "задачи Гаранина в текущем спринте",
                 "intent": "task_search",
                 "entities": [
-                    {"type": "member", "value": "Иванов"},
+                    {"type": "member", "value": "Гаранин"},
                     {"type": "sprint", "value": "current_sprint"}
                 ],
             },
@@ -120,10 +120,10 @@ class LLMIntentRouter:
                 "entities": [],
             },
             {
-                "query": "суммаризируй задачу PRD1-123",
+                "query": "суммаризируй задачу WMB-123",
                 "intent": "task_summary",
                 "entities": [
-                    {"type": "task_key", "value": "PRD1-123"}
+                    {"type": "task_key", "value": "WMB-123"}
                 ],
             },
             {
@@ -134,10 +134,10 @@ class LLMIntentRouter:
                 ],
             },
             {
-                "query": "покажи задачи Петрова",
+                "query": "покажи задачи Калачанова",
                 "intent": "task_search",
                 "entities": [
-                    {"type": "member", "value": "Петров"}
+                    {"type": "member", "value": "Калачанов"}
                 ],
             },
         ]
@@ -203,10 +203,10 @@ Available intents:
 9. help - помощь, что умеешь
 
 Extract entities:
-- sprint: PRD1-SPRNT-1, current_sprint, any sprint identifier
-- release: PRD1-RELEASE-1, REL-*, any release identifier
+- sprint: DMS-SPRNT-1, current_sprint, any sprint identifier
+- release: DMS-2024-Q3, REL-*, any release identifier
 - member: any person name (Russian or login)
-- task_key: PRD1-123, PRD2-456, any task identifier
+- task_key: WMB-123, DMS-456, any task identifier
 
 Output format (JSON only):
 {
