@@ -1,6 +1,7 @@
 """API version 1 routes for PO Agent Platform v2."""
 
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from po_agent.config import get_settings
 from po_agent.harness import HarnessRequest, HarnessRuntime
 from po_agent.harness.dialogue_runtime import LLMJsonSemanticInterpreter
 from po_agent.harness.runtime_factory import RuntimeBundle, build_runtime_bundle
+from .goal_coverage import guard_completed_goal_coverage
+from .missing_goal_execution import run_bounded_missing_goals
 from po_agent.llm.real import RealLLMClient
 from po_agent.ops.as21_diagnostics import build_as21_diagnostics
 
@@ -102,6 +105,7 @@ def get_runtime_bundle() -> RuntimeBundle:
                 learned_semantics_path=settings.learned_semantics_path,
                 agent_core_v3_enabled=settings.agent_core_v3_enabled,
                 agent_core_v4_enabled=settings.agent_core_v4_enabled,
+                v4_synthesis_elision_enabled=settings.v4_synthesis_elision_enabled,
             )
             _runtime = _bundle.runtime
             _runtime_init_error = None
@@ -137,6 +141,160 @@ def _decorate_v4_response(response: dict, bundle: RuntimeBundle) -> dict:
     response["ui"] = contract.compact() if contract is not None else None
     if runtime is not None and hasattr(runtime, "plugin_ids"):
         response["plugin_ids"] = list(runtime.plugin_ids)
+    return response
+
+
+_TASK_PERIOD_INTENT_RE = re.compile(
+    r"(?:\bпериод\b|"
+    r"\bза\s+(?:последн(?:ий|ие|юю|их)\s+)?\d+\s+д(?:ень|ня|ней)\b|"
+    r"\bза\s+день\b|\bсегодня\b|"
+    r"(?:^|\s)(?:с|от|начиная\s+с)\s*\d{2}\.\d{2}\.\d{4}\b|"
+    r"(?:^|\s)(?:с|от|начиная\s+с)\s*\d{4}-\d{2}-\d{2}\b)",
+    flags=re.I,
+)
+
+
+def _query_requests_task_period(query: str) -> bool:
+    """Conservative safety signal for an explicit task-period constraint.
+
+    This does not route the request or choose a capability. It is used only
+    after execution to prevent a COMPLETED task answer when the planner silently
+    omitted a period the user explicitly asked for.
+    """
+    return bool(_TASK_PERIOD_INTENT_RE.search(str(query or "").strip()))
+
+
+def _response_applied_argument(response: dict, argument: str) -> bool:
+    data = response.get("data")
+    if not isinstance(data, dict):
+        return False
+    results = data.get("results")
+    if not isinstance(results, list):
+        return False
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        capability_id = str(item.get("capability_id") or "")
+        if not capability_id.startswith("task."):
+            continue
+        arguments = item.get("arguments")
+        if isinstance(arguments, dict) and str(arguments.get(argument) or "").strip():
+            return True
+    return False
+
+
+def _guard_completed_constraint_coverage(response: dict, original_query: str) -> dict:
+    """Fail closed when a completed task trajectory dropped an explicit period.
+
+    This is a dialogue/API postcondition guard outside Agent Core. It does not
+    infer the missing value or alter routing; it only converts an unsafe
+    over-broad COMPLETED answer into a resumable clarification.
+    """
+    if response.get("status") != "COMPLETED":
+        return response
+    if not _query_requests_task_period(original_query):
+        return response
+
+    data = response.get("data")
+    results = data.get("results") if isinstance(data, dict) else None
+    task_executed = any(
+        isinstance(item, dict) and str(item.get("capability_id") or "").startswith("task.")
+        for item in (results or [])
+    )
+    if not task_executed or _response_applied_argument(response, "created_period"):
+        return response
+
+    state = data.get("_agent_core_v4") if isinstance(data, dict) else None
+    if not isinstance(state, dict):
+        state = {}
+        if isinstance(data, dict):
+            data["_agent_core_v4"] = state
+
+    response["status"] = "NEEDS_CLARIFICATION"
+    response["answer"] = None
+    response["question"] = (
+        "Вы указали период, но он не был безопасно применён к поиску задач. "
+        "Уточните период создания задач. Например: «за последние 2 дня», "
+        "«с 30.09.2026 по сегодня» или «с 30.09.2026 по 09.10.2026»."
+    )
+    response["options"] = []
+    response["warnings"] = ["v4_constraint_coverage_clarification"]
+    response["evidence"] = []
+    if isinstance(data, dict):
+        data.pop("results", None)
+    state["constraint_coverage_failure"] = {
+        "constraint": "created_period",
+        "reason": "requested_but_not_applied",
+    }
+    state["original_query_preserved"] = bool(str(original_query or "").strip())
+    return response
+
+
+def _promote_planner_failure_to_clarification(response: dict, original_query: str) -> dict:
+    """Convert only understanding/planning failures into a typed clarification.
+
+    Source/provider/internal failures remain FAILED. This is an API/dialogue
+    policy seam outside Agent Core and reuses the existing clarification
+    continuation mechanism.
+    """
+    if response.get("status") != "FAILED":
+        return response
+    warnings = [str(item) for item in (response.get("warnings") or [])]
+    if "v4_runtime_failure" not in warnings:
+        return response
+
+    data = response.get("data")
+    state = data.get("_agent_core_v4") if isinstance(data, dict) else None
+    if not isinstance(state, dict):
+        return response
+
+    exception_type = str(state.get("exception_type") or "")
+    error = str(state.get("error") or "")
+    lowered = error.casefold()
+
+    # Never turn provider/network failures into a request for user clarification.
+    provider_markers = (
+        "httpstatuserror", "429", "rate limit", "ratelimit", "timeout",
+        "connecterror", "connectionerror", "readtimeout",
+    )
+    if any(marker in lowered for marker in provider_markers):
+        return response
+
+    period_failure = exception_type == "ValueError" and "created_period" in lowered
+    planner_failure = exception_type == "V4ContractError" and any(
+        marker in lowered
+        for marker in (
+            "planner failed robust bounded repair",
+            "planner step budget exhausted without ready",
+            "planner literal is not grounded",
+            "planner person reference is neither query-derived",
+        )
+    )
+    if not (period_failure or planner_failure):
+        return response
+
+    if period_failure:
+        question = (
+            "Не удалось однозначно понять период в запросе. Уточните период создания задач. "
+            "Например: «за последние 2 дня», «с 30.09.2026 по сегодня» "
+            "или «с 30.09.2026 по 09.10.2026»."
+        )
+    else:
+        question = (
+            "Не удалось однозначно собрать безопасную траекторию для этого сложного запроса. "
+            "Уточните одним сообщением обязательные фильтры: исполнитель, пространство, статус, "
+            "тип задачи, период создания и/или спринт. Рекомендуемый формат: "
+            "«Открытые задачи <исполнитель> типа <тип> в <пространстве>, "
+            "созданные с <дата> по сегодня»."
+        )
+
+    response["status"] = "NEEDS_CLARIFICATION"
+    response["answer"] = None
+    response["question"] = question
+    response["options"] = []
+    response["warnings"] = ["v4_planner_needs_clarification"]
+    state["clarification_promoted_from"] = "v4_runtime_failure"
+    state["original_query_preserved"] = bool(str(original_query or "").strip())
     return response
 
 
@@ -287,6 +445,15 @@ def _remember_clarification(response: dict, session_id: str, original_query: str
         v4_state.pop("continuation_observations", None)
         v4_state.pop("continuation_required_skills", None)
 
+    # Bound retained in-memory session state; expired entries are swept
+    # on insertion rather than only when their exact key is accessed.
+    for key, item in list(_pending_clarifications.items()):
+        if _clarification_expired(item):
+            _pending_clarifications.pop(key, None)
+    if len(_pending_clarifications) >= 100:
+        oldest = min(_pending_clarifications, key=lambda key: _pending_clarifications[key].created_at)
+        _pending_clarifications.pop(oldest, None)
+
     _pending_clarifications[session_id] = PendingClarification(
         clarification_id=clarification_id,
         original_query=original_query,
@@ -383,6 +550,41 @@ async def _run_query(payload: QueryRequest, request: Request, *, force_v4: bool 
                 session_context=_session_context_for(session_id),
             ))
             response = _decorate_v4_response(result.to_dict(), bundle)
+            response = _promote_planner_failure_to_clarification(
+                response,
+                effective_query or original_query,
+            )
+            response = _guard_completed_constraint_coverage(
+                response,
+                effective_query or original_query,
+            )
+            # Experimental bounded API orchestration. Only trusted loopback QA;
+            # session principal/auth ownership is a separate release blocker.
+            if (
+                getattr(settings, "v4_goal_coverage_guard_enabled", False)
+                and getattr(settings, "v4_goal_continuation_enabled", False)
+                and getattr(settings, "v4_missing_goal_execution_enabled", False)
+                and response.get("status") == "COMPLETED"
+                and request.client is not None
+                and request.client.host in ("127.0.0.1", "::1")
+            ):
+                executed = await run_bounded_missing_goals(
+                    bundle.v4_runtime,
+                    response,
+                    effective_query or original_query,
+                    session_id,
+                    prior=continuation.observations,
+                    loaded_skills=continuation.loaded_skills,
+                    session_context=_session_context_for(session_id),
+                )
+                response = executed.response
+            if getattr(settings, "v4_goal_coverage_guard_enabled", False):
+                response = guard_completed_goal_coverage(
+                    response,
+                    effective_query or original_query,
+                    preserve_state=getattr(settings, "v4_goal_continuation_enabled", False),
+                    trusted_prior_observations=continuation.observations,
+                )
             response = _remember_completed_session_context(response, session_id)
             response = _remember_clarification(response, session_id, effective_query or original_query)
         else:
