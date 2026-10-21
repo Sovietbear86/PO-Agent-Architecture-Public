@@ -19,7 +19,6 @@ from typing import Any
 from po_agent.llm.client import LLMMessage
 
 from .dialogue_runtime import ClarificationNeed, SemanticFrame
-from .live_entity_grounding import configured_product_aliases
 from .semantic_authorization import (
     BlindConsensusSemanticInterpreter,
     BlindRecoveryLLMJsonSemanticInterpreter,
@@ -100,12 +99,11 @@ def _person_raw(query: str) -> str | None:
 
 def _explicit_product(query: str) -> str | None:
     low = query.casefold()
-    matches = {
-        canonical
-        for alias, canonical in configured_product_aliases().items()
-        if alias and alias in low
-    }
-    return next(iter(matches)) if len(matches) == 1 else None
+    if "olap" in low or re.search(r"\bolp\b", low):
+        return "OLP"
+    if "datamarts" in low or "data marts" in low or re.search(r"\bdms\b", low):
+        return "DMS"
+    return None
 
 
 def deterministic_core8_frame(query: str, *, allowed: set[str]) -> SemanticFrame | None:
