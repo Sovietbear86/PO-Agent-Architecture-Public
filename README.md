@@ -11,6 +11,10 @@ This distribution is intentionally separated from the product-development reposi
 - no development-team product configuration;
 - no Git history from the development repository in the final community repo.
 
+## Bundled MCP-SWTR
+
+The public distribution includes vetted Python MCP-SWTR source in `mcp-swtr/`. The default stdio wrapper starts it without a separate checkout. Install its Python 3.13 dependencies and configure your own network/token credentials; see `DEPLOYMENT.md`. MCP's direct tool surface may include writes, so expose the community Task API's read-only facade rather than the raw MCP server.
+
 ## Configure your deployment
 
 The two deployment-owned configuration files are:

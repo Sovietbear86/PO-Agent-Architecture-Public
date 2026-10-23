@@ -6,10 +6,10 @@ This guide starts the community build on one workstation/localhost.
 
 Install:
 
-- Python 3.11+;
+- Python 3.11+ for Task API/Agent, **Python 3.13+ for the bundled MCP-SWTR server**;
 - Node.js 20+ (22 recommended);
 - npm;
-- access to your organization's MCP-SWTR server or local MCP-SWTR checkout;
+- the bundled Python MCP-SWTR source under `mcp-swtr/` (stdio) **or** access to your organization's existing MCP-SWTR SSE server;
 - a valid **SWTR token** for REAL AS21 read access;
 - an **OpenAI-compatible LLM endpoint**, model name and API key.
 
@@ -91,13 +91,12 @@ from `task-api/.env.example`.
 
 ```dotenv
 SWTR_MCP_TRANSPORT=stdio
-SWTR_MCP_SERVER_DIR=/absolute/path/to/mcp-swtr
 SWTR_TOKEN=YOUR_SWTR_TOKEN
 SWTR_MCP_BASE_URL=https://YOUR-AS21-SWTR-ENDPOINT
 FRONTEND_ORIGIN=http://localhost:5175
 ```
 
-The repository wrapper `mcp-swtr-wrapper.sh` passes only configured environment values to the MCP process. The community wrapper does **not** read user-specific secret files.
+The repository wrapper `mcp-swtr-wrapper.sh` uses the bundled `mcp-swtr/` source by default and passes only configured environment values to the MCP process. The community wrapper does **not** read user-specific secret files.
 
 ### SSE example
 
@@ -109,6 +108,34 @@ SWTR_MCP_BASE_URL=https://YOUR-AS21-SWTR-ENDPOINT
 ```
 
 If the SSE server owns authentication itself, keep the token only in that server's environment.
+
+## 4a. Install the bundled MCP-SWTR server (stdio only)
+
+This distribution now includes the necessary Python source. **Do not clone GitVerse or a separate MCP repository.**
+
+```bash
+cd mcp-swtr
+python3.13 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+deactivate
+cd ..
+```
+
+In `task-api/.env` set `SWTR_MCP_TRANSPORT=stdio`, `SWTR_TOKEN` and `SWTR_MCP_BASE_URL` to your authorized values. **Leave `SWTR_MCP_SERVER_DIR` unset** for the bundled directory; `mcp-swtr-wrapper.sh` will choose the correct path and use `mcp-swtr/.venv/bin/python`. Do not commit `.env` or paste credential values into logs.
+
+If using an existing SSE service, skip this installation and configure `SWTR_MCP_TRANSPORT=sse` and `SWTR_MCP_SSE_URL` instead. In SSE mode the remote MCP process owns its credentials.
+
+### Troubleshooting first boundary
+
+After Task API starts, query **both** endpoints:
+
+```bash
+curl -fsS http://127.0.0.1:8003/health
+curl -fsS http://127.0.0.1:8003/api/v1/swtr-read/health
+```
+
+The first only confirms Task API availability; the second checks MCP transport and tool registry. If the second fails, check (in order) bundled Python dependencies / wrapper path, configured `SWTR_MCP_TRANSPORT`, and whether the token and base URL are **set** (never print their values). If MCP connects but AS21 reads fail, verify organizational network/VPN access, token scope and server response. **An empty result is not evidence of an empty AS21 dataset until a scoped source read succeeds.**
 
 ## 5. Start Task API
 
@@ -231,7 +258,7 @@ Open:
 | `SWTR_MCP_TRANSPORT` | yes | `stdio` or `sse` |
 | `SWTR_TOKEN` | yes* | AS21/SWTR token (*unless auth belongs entirely to remote SSE) |
 | `SWTR_MCP_BASE_URL` | stdio | upstream AS21/SWTR endpoint |
-| `SWTR_MCP_SERVER_DIR` | stdio | local MCP-SWTR checkout |
+| `SWTR_MCP_SERVER_DIR` | optional | custom MCP path; omit for bundled `mcp-swtr/` |
 | `SWTR_MCP_SSE_URL` | sse | remote/local SSE URL |
 | `FRONTEND_ORIGIN` | no | CORS origin, default localhost:5175 |
 
