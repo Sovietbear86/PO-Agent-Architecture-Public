@@ -140,6 +140,9 @@ def _agent_query(body: object) -> tuple[bool, str]:
             {"PARTIAL", "NEEDS_CLARIFICATION", "FAILED"} else "UNEXPECTED_STATUS")
     if not isinstance(ev, list) or not ev:
         return False, "COMPLETED_WITHOUT_SOURCE_EVIDENCE"
+    if not any(isinstance(item, dict) and str(item.get("source") or "").lower()
+               in {"as21", "real_as21", "swtr", "mcp-swtr"} for item in ev):
+        return False, "COMPLETED_WITHOUT_AS21_EVIDENCE"
     if body.get("runtime") != "agent_core_v4":
         return False, "UNEXPECTED_RUNTIME"
     return True, "COMPLETED_V4_WITH_EVIDENCE"
