@@ -61,6 +61,7 @@ class HealthCheckTests(unittest.TestCase):
                  "evidence": [{"source": "REAL_AS21"}]}
         self.assertTrue(health._agent_query(valid)[0])
         self.assertFalse(health._agent_query({**valid, "evidence": []})[0])
+        self.assertFalse(health._agent_query({**valid, "evidence": [{"source": "AGENT_RUNTIME"}]})[0])
         self.assertFalse(health._agent_query({**valid, "status": "FAILED"})[0])
         self.assertFalse(health._agent_query({**valid, "runtime": "legacy_harness"})[0])
 
