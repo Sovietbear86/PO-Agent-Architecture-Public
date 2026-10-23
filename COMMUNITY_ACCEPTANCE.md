@@ -72,3 +72,17 @@ The final repository must be created from an exported working tree **without the
 - [ ] no commit ancestry from `PO-Agent-Architecture-Review`;
 - [ ] repository visibility/access is explicitly chosen by the owner;
 - [ ] organization secret scanning / dependency scanning is enabled where available.
+
+## F. GigaCode deployment / layered health gate
+
+- [ ] `.gigacode/skills/public-deploy/SKILL.md` and `.gigacode/skills/public-health-check/SKILL.md` are in the public checkout and referenced from `GIGACODE.md`.
+- [ ] `python3 -m unittest discover -s scripts/tests -p 'test_public_health_check.py' -v` passes offline.
+- [ ] MCP Python 3.13 installed from the **bundled** `mcp-swtr/` checkout; not from an unrelated local GitVerse source.
+- [ ] HTTP Task API `/health` is **not** mistaken for source reachability.
+- [ ] Task API SWTR `/api/v1/swtr-read/health` identifies connected MCP and required read tool.
+- [ ] Agent V4 `/api/v1/health` reports `adapter=task-api`, V4 ready and healthy source status (never `fake`).
+- [ ] One **scoped authorized REAL AS21 task read** returns the exact requested code; LLM task query gives source-backed evidence.
+- [ ] Missing SWTR token / AS21 network / LLM endpoint failures do not turn into fabricated factual-zero results.
+- [ ] Browser smoke verifies UI proxy `/api` → Agent :8004.
+- [ ] No `.env`, real tokens, personal data or raw AS21 payloads appear in GigaCode reports.
+- [ ] If Docker is not installed/available, explicitly report container build as **NOT TESTED**, not GREEN.
