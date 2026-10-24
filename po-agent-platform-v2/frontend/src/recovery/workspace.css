@@ -394,7 +394,10 @@ body.task-drawer-active .agent-launcher{display:none!important}
 @keyframes po-spin{to{transform:rotate(360deg)}}
 
 .intelligence-box{min-height:150px}
-.intelligence-loading{position:relative;overflow:hidden}
+.intelligence-loading{
+  position:relative;
+  overflow:hidden
+}
 .intelligence-loading::before{
   content:"";
   position:absolute;
@@ -429,7 +432,11 @@ body.task-drawer-active .agent-launcher{display:none!important}
   padding-top:10px;
   border-top:1px solid rgba(126,226,255,.08)
 }
-.intelligence-section>strong{color:#8debf9;font-size:11px;text-transform:none}
+.intelligence-section>strong{
+  color:#8debf9;
+  font-size:11px;
+  text-transform:none
+}
 .intelligence-table-wrap{margin:0;max-height:300px;overflow:auto}
 .intelligence-table{width:100%;border-collapse:collapse}
 .intelligence-table th{
