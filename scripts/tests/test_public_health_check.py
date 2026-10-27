@@ -43,10 +43,10 @@ class HealthCheckTests(unittest.TestCase):
 
     def test_mcp_registry_requires_source_read_tool(self):
         self.assertTrue(health._mcp_health({
-            "status": "connected", "tool_count": 48, "read_unit": True
+            "status": "connected", "tool_count": 49, "read_unit": True
         })[0])
         self.assertFalse(health._mcp_health({
-            "status": "connected", "tool_count": 48, "read_unit": False
+            "status": "connected", "tool_count": 49, "read_unit": False
         })[0])
 
     def test_agent_requires_v4_and_source_ready(self):
