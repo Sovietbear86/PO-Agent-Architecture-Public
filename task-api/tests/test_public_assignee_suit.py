@@ -25,8 +25,8 @@ def test_suit_missing_remains_optional():
     assert task["task_type_name"] is None
 
 
-def test_public_config_spaces_are_not_hardcoded():
-    assert callable(swtr_assignee._configured_spaces)
-    assert "PAY" not in swtr_assignee._configured_spaces() or isinstance(
-        swtr_assignee._configured_spaces(), frozenset
-    )
+def test_public_config_spaces_are_not_hardcoded(monkeypatch, tmp_path):
+    config = tmp_path / "products.yaml"
+    config.write_text("products:\n  PAY: {}\n  OPS: {}\n", encoding="utf-8")
+    monkeypatch.setenv("PRODUCTS_CONFIG_PATH", str(config))
+    assert swtr_assignee._configured_spaces() == frozenset({"PAY", "OPS"})
