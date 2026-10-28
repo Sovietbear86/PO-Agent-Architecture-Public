@@ -1,34 +1,28 @@
-# GigaCode — NEXT ACTION (Public PR #4)
+# GigaCode — CURRENT NEXT ACTION
 
-## A230R3.7-PUBLIC-PR4-INTEGRITY-QA — independent security/build gate
+## A230R3.7-R2-PUBLIC-SECURITY-REGATE — independent follow-up after owner-only fix
 
-**Only QA, no code changes and no commits.** This is public-safe release preflight for `Sovietbear86/PO-Agent-Architecture-Public` PR #4, based on Draft PR #3 branch `feat/gigacode-public-deploy-health-skills`. Never merge, push, run write-capable AS21 MCP tools, or copy private Review history. Parent PR #3 and PR #4 must remain Draft until GREEN.
+**ONLY QA.** Do not fix source code, tests, dependencies, configs, docs or Core. No commit, merge, push, force operations, user-service stop, unauthorized live AS21 mutation or tenant-wide scans. Preserve existing local worktree. Always fetch and verify `LOCAL_HEAD == REMOTE_HEAD == TESTED_HEAD`.
 
-### Gate 0 — exact source revisions
-1. Fetch origin. Record `LOCAL_HEAD`, `REMOTE_HEAD` and `TESTED_HEAD` for `feat/a230r3-community-migration`; all must match. Check working tree and never overwrite user changes.
-2. Compare staged PR #4 against parent PR #3. Verify no PR #3 deploy and health skills are lost. Check 6 Core V4 files remain byte-identical to Public `main` (Public has known sanitized docstring distinct from private Review).
-3. Scan entire PR head and changed-file history for keys, tokens, personal details, internal hosts, hardcoded employee IDs, corp `products.yaml` and secret-bearing configs. Do not print sensitive content. If found, STOP / RED.
+### Why this gate exists
+A230R3.7 tested `2c05419` and reported RED **only** because `prepublish_scan.py` detected a legacy internal space identifier in a comment inside `po-agent-platform-v2/src/po_agent/harness/v4_plugins/_task_live_handlers.py` around line 1129. A/B REAL AS21, 72 offline tests, 49 MCP tools, frontend build and Core 6/6 were GREEN on that tested snapshot. Previous QA also flagged missing explicit PyYAML dependency as minor. Owner committed:
+- `66c5501`: removed specific internal space identifier from historical performance comment, no behavioral change.
+- `339aa92`: declared `PyYAML>=6.0` in `task-api/requirements.txt`, matching already existing `import yaml` and `products.yaml` dynamic configuration.
+Both remain inside **Draft PR #4**, stacked on Draft PR #3.
 
-### Gate 1 — Python imports, plugin registry, and schema contracts
-1. Create isolated venv using documented public requirements; run `python -m compileall` on `mcp-swtr`, `task-api/app`, `po-agent-platform-v2/src`. Run import smoke for `task_catalog`, `_task_live_handlers`, `time_accounting_period`, `time_accounting_member`, `time_accounting_aggregate`, `goal_coverage`, `missing_goal_execution`, `api.v1`, `task_api`, `runtime_factory`.
-2. Registry: `task.type_analysis` and `task.hierarchy` each have SkillSpec, CapabilitySpec, handler binding and UI contract. Import, instantiate and run relevant synthetic handlers. Preserve existing task skills, live task/search/read handlers, safe source scope, pagination and provenance.
-3. New member/date worklogs capability must appear in V4 registry; its handler uses actual `GET /api/v1/swtr-read/work-logs/report`, and MCP `get_work_report_filter`. Check required author and date bounds; missing/partial source never shown as factual zero. Verify all import signatures match; prevent dropped fields `task_type_code` and `task_type_name`.
-4. Public `swtr_assignee.py` retains configuration-based allowed spaces via `PRODUCTS_CONFIG_PATH`; never restore private hardcoded space list. Check `settings.py` retains local placeholders (no internal corporate hosts). All new experimental flags default OFF.
-5. Check Python/package requirements for `yaml`, `pydantic-settings`, MCP and real deployment. Unit-tests must use synthetic task/member names and spaces. Missing coverage is an explicit release gate, not an automatic GREEN.
+### Required re-gate
+1. Confirm fresh `TESTED_HEAD` of Public `feat/a230r3-community-migration` equals origin; identify *exact* diff from failed baseline `2c05419` and prove changes strictly the one comment and one dependency declaration.
+2. Run `python3 scripts/prepublish_scan.py` **on the actual PR tree**. It MUST exit 0. Do not hide or suppress its rules. If RED, report exact first finding without exposing sensitive values. Re-check public history/provenance; no new credentials, corporate hosts or PII.
+3. Reinstall/build in clean isolated test environment using **declared** Public dependencies, and verify import `yaml` works in isolated Task API venv; test actual `_configured_spaces()` using a synthetic `products.yaml`. Ensure no accidental hardcoded internal project/space. Avoid hidden dependency from co-installed agent venv.
+4. Re-run available synthetic regression (prior 72 passed), V4 skills registry and imports, frontend build, 49 MCP instruments, read-only route count, tests for suit / hierarchy / worklogs with bounded REAL AS21 oracle if authorized. Report precise numbers and changes vs baseline, no fake green.
+5. Public **6/6 Core V4** SHA match against Public main. No Core edits. PR #3 skills and tools retained, PR #4 remains Draft.
+6. Determine release decision accurately: clean-clone full-stack `public-deploy` was **NOT RUN** in R1 due to conflicts with user running services and health H1/H2/H4 RED, H5/H6 INCOMPLETE. These are **still NOT VERIFIED** unless actually run in a separate safe environment with consent. Never label full release GREEN based solely on safety re-gate. Prior four LLM 429 cases are still OPEN.
 
-### Gate 2 — offline regression
-1. Run all available Agent V4, Task API and public synthetic tests; report passed/failed/skipped with exact first broken import or assertion; distinguish missing dependency from product defect.
-2. Run frontend install + build and UI unit/smoke for task rows, ranked `candidates`, worklog and sprint rows, and NO raw planner JSON.
-3. Verify MCP-SWTR local startup and list-tools: **49 expected** with `get_work_report_filter`; `public_health_check.py` H0/H1/H2 local; 49 count in `DEPLOYMENT.md` and Public skills. Never claim live AS21 access based on fake health.
-4. Test missing/invalid auth/space and read-only operation boundaries. Public server must not make tenant-wide unbounded AS21 scans. Do not use live write-capable MCP tools.
+### Verdict
+- `SECURITY_GATE_GREEN / RELEASE_INCOMPLETE` if scanner and regression pass but clean-clone full-stack or live public health remain untested.
+- `RED` if scanner or import/test regressions fail; identify first boundary and stop.
+- `PUBLIC_RELEASE_GREEN` only after actual full standalone public-deploy/health H0–H6 and required authorized A/B verification pass.
+Report TESTED_HEAD, gate matrix, first failing boundary and exact remaining blockers in chat. STOP.
 
-### Gate 3 — conditional integration (only if authorized)
-1. Run `public-deploy` skill from **clean clone** in isolated environment, with secrets supplied only locally (never logged/committed); run `public-health-check` H0–H6.
-2. If REAL AS21 credentials and network are available, compare bounded A (Agent) vs B (independent AS21 oracle) for date worklogs, task suit, hierarchy, context clarifications, sprint calendar vs lifetime and browser UI. Do not run broad scans.
-3. If credentials, LLM or VPN unavailable, mark `INCOMPLETE` and list blocked gates. Prior Review A/B was conditionally GREEN, four LLM 429 E2E cases remain unverified; do not re-label.
-
-### Final report format
-Return in chat a table `gate | observed outcome | evidence/counts | status`, exact TESTED_HEAD and first failing boundary, security verdict, Core 6/6, and explicit PR #4 release recommendation. **GREEN** only if all mandatory safety/build/tests pass; **RED** for product defects or source secrets; **INCOMPLETE** for genuine missing environment/oracle. No fixes/commits. STOP.
-
-### One-line command
-Run A230R3.7-PUBLIC-PR4-INTEGRITY-QA from public branch GIGACODE_NEXT_ACTION.md. Sync HEAD; independent read-only QA, no code changes, detailed report and STOP.
+### GigaCode one-line command
+Execute A230R3.7-R2-PUBLIC-SECURITY-REGATE from Public GIGACODE_NEXT_ACTION.md. Sync HEAD, scan + offline regress + Core 6/6, verify PyYAML clean-env import. QA ONLY, no changes/commits, report and STOP.
