@@ -39,9 +39,12 @@ def _local_url(value: str) -> str:
     return value.rstrip("/")
 
 
-def _fetch(url: str, *, payload: dict | None = None, timeout: float = 10.0) -> tuple[int | None, object, str | None]:
+def _fetch(url: str, *, payload: dict | None = None, timeout: float = 10.0,
+           accept: str = "application/json") -> tuple[int | None, object, str | None]:
     """Return status, parsed JSON (or short HTML), sanitized error type."""
-    headers = {"Accept": "application/json"}
+    if accept not in {"application/json", "text/html"}:
+        raise ValueError("Unsupported health-check Accept header")
+    headers = {"Accept": accept}
     data = None
     if payload is not None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -70,9 +73,9 @@ def _fetch(url: str, *, payload: dict | None = None, timeout: float = 10.0) -> t
 
 
 def _check(name: str, url: str, valid, *, payload: dict | None = None,
-           timeout: float = 10.0) -> dict:
+           timeout: float = 10.0, accept: str = "application/json") -> dict:
     started = time.monotonic()
-    status, body, error = _fetch(url, payload=payload, timeout=timeout)
+    status, body, error = _fetch(url, payload=payload, timeout=timeout, accept=accept)
     result = {"name": name, "status": "RED", "http": status,
               "elapsed_ms": round((time.monotonic() - started) * 1000),
               "detail": "UNVERIFIED"}
@@ -161,7 +164,7 @@ def run(args: argparse.Namespace) -> dict:
     checks.append(_check("H3_AGENT_V4", args.agent_url + "/api/v1/health",
                          _agent_health, timeout=args.timeout))
     checks.append(_check("H4_FRONTEND", args.frontend_url + "/", _frontend,
-                         timeout=args.timeout))
+                         timeout=args.timeout, accept="text/html"))
     if args.task_code:
         code = args.task_code.upper()
         checks.append(_check(
