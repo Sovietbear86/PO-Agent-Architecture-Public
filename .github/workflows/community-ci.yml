@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, feat/gigacode-public-deploy-health-skills]
 
 permissions:
   contents: read
@@ -81,3 +81,48 @@ jobs:
           cache-dependency-path: po-agent-platform-v2/frontend/package-lock.json
       - run: npm ci
       - run: npm run build
+
+  offline-agent-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install declared Agent test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e './po-agent-platform-v2[dev]'
+      - name: Focused synthetic V4 regressions (no REAL AS21 required)
+        env:
+          AS21_MODE: fake
+          AGENT_CORE_V4_ENABLED: "true"
+          LLM_API_KEY: ""
+        run: |
+          python -m pytest -q \
+            po-agent-platform-v2/tests/test_member_worklogs_period.py \
+            po-agent-platform-v2/tests/test_api_free_text_clarification.py \
+            po-agent-platform-v2/tests/test_api_sprint_lifetime_guard.py \
+            po-agent-platform-v2/tests/test_member_sprint_scope_explanation.py \
+            po-agent-platform-v2/tests/test_sprint_aggregate_scope_guard.py \
+            po-agent-platform-v2/tests/test_public_task_catalog_migration.py \
+            po-agent-platform-v2/tests/test_a230r2_week_periods.py
+
+  offline-task-api-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install strictly declared Task API dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r task-api/requirements.txt
+      - name: Test synthetic read-only SWTR facades
+        env:
+          PYTHONPATH: task-api
+        run: |
+          python -m pytest -q \
+            task-api/tests/test_swtr_person_worklogs_report.py \
+            task-api/tests/test_public_assignee_suit.py
