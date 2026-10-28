@@ -1,31 +1,28 @@
 # GigaCode — CURRENT NEXT ACTION
 
-## A230R3.8-R2-PUBLIC-ISOLATED-UI-REGATE
+## A230R3.9-PUBLIC-BROWSER-DOM-RELEASE-GATE — independent QA only
 
-**Independent QA ONLY.** No code changes, commits, pushes, merges, force operations, source/AS21 writes or killing existing user services. Review 8004/5175/3000 MUST stay untouched. Fetch origin, verify LOCAL_HEAD=REMOTE_HEAD=TESTED_HEAD on Public `feat/a230r3-community-migration`; test only the actual current HEAD in a fresh temporary clone. PR #4 and parent PR #3 remain Draft.
+**Do not change production code, Core, tests, docs, git history, PRs, configs, credentials or AS21. No commits/merges/pushes.** Preserve user's running Review services and working tree. Fetch remote, confirm exact `LOCAL_HEAD = REMOTE_HEAD = TESTED_HEAD` on Public `feat/a230r3-community-migration`; work in isolated temporary clone with temporary services only. Parent PR #3 / PR #4 remain Draft until owner release.
 
-### Previous R1 evidence
-R1 tested `4b493eb` on true clean isolated Public clone. Security and Core V4 6/6 GREEN; 15/15 Task API; V4 50/50; 49 MCP tools, 14 plugins/73 skills/75 caps/70 UI; H0–H3/H5/H6 GREEN and bounded REAL AS21 oracle matched. **H4 FRONTEND RED** for 2 causes:
-1. `scripts/public_health_check.py` incorrectly requested JSON from a Vite SPA GET; Vite serves index.html to HTML Accept only.
-2. `frontend/vite.config.ts` hardcoded port 5175 and backend proxy 8004 (occupied by user's Review), so isolated Vite on an alternate port was not wired to the isolated Agent.
-R1 correctly returned `RELEASE_INCOMPLETE` without stopping Review.
+### Proven baseline
+- A230R3.8-R2 on `7fbb47f`: independent Security Scan GREEN; clean dependencies and offline tests GREEN, V4 50/50; Task API 15/15; health-check 9/9; 49 MCP tools; 14 plugins / 73 skills / 75 capabilities / 70 UI; frozen Public Core V4 6/6. Isolated Public stack on independently available local ports: H0–H6 GREEN (exit 0), REAL AS21 bounded A/B (task type, hierarchy, author/date worklogs) GREEN; isolated Vite `/api` routed to **isolated** Public Agent, not Review. All existing Review services untouched. This is *not yet* browser DOM proof.
+- Independently checked GitHub Actions: `Community CI` run **40756533616** for `7fbb47f` completed **success**, all six jobs GREEN: `sanitize`, `backend`, `frontend`, `health-tool`, `offline-agent-regression`, `offline-task-api-regression`. Recheck status for actual tested HEAD if changed.
+- R2 `RELEASE_INCOMPLETE` because browser DOM (Playwright/Puppeteer unavailable in that environment), canonical default-port clean host deployment not executed, and 4 historical LLM 429 E2E cases remain open.
 
-### Owner changes for R2
-- `03c7b13` Health check H4 sends `Accept: text/html` specifically, keeps JSON for API checks.
-- `78b3211` Vite `PO_AGENT_DEV_UI_PORT` and `PO_AGENT_DEV_PROXY_PORT` configurable with loopback-only proxy destination and unprivileged ports, default 5175/8004.
-- `d6ff44a` H4 and HTML Accept offline tests.
-- `2255e1d` Public DEPLOYMENT.md isolated-port guidance.
-- `bded7e4` Community CI now includes synthetic Agent/Task API tests and triggers for stacked PR #4. Review and execute CI, and report failing checks independently; do not declare GREEN from workflow configuration alone.
-- Core V4 files untouched.
+### Gate A: real browser DOM (primary objective)
+1. Assess available browser automation without installing intrusive/untrusted software. Prefer existing headless Chromium or Playwright in separate isolated environment. If unavailable, report `BROWSER_NOT_VERIFIED`; **do not** equate HTML H4 or proxy API response to DOM proof.
+2. Create safe isolated public clone and full stack (distinct free local loopback ports; no termination of Review). Observe browser console/network and confirm root rendering, navigation `Обзор`, `Задачи`, `Спринты`, `Релизы`, `Качество`; loading vs errors, session data isolation; no raw planner JSON displayed.
+3. Perform bounded authorized user-visible queries through UI for: task key/title, task type, hierarchy/epics, member worklogs for an explicit period, `team.assignee_recommendation` ranked `candidates`, sources/evidence, explicit empty result and fail-closed negative state. Compare visible business rows to source response counts (respect documented sample caps), confirm correct labels and no `capability_id/arguments/widget:/kind:` leaking.
+4. Verify Vite proxy `/api` is strictly Public isolated Agent using distinct port proof. Protect tokens; no raw AS21 payload/screenshot with personal identities in report.
 
-### Mandatory independent gates
-1. Exact owner delta vs R1 HEAD; check no unintended files, no secret/leaked internal identifiers. `python3 scripts/prepublish_scan.py` must exit 0.
-2. Confirm the `.github/workflows/community-ci.yml` YAML parses, the PR #4 branch target actually triggers jobs, and the two new offline regression jobs execute; when GitHub Actions is unavailable mark CI NOT VERIFIED rather than implying GREEN. Full clean-declared dependency install in isolated temp clone; Task API tests, all available V4 tests, health-check tests, `python -m compileall` and frontend `npm run build`; record precise pass/fail counts, baseline 15/15, V4 50/50, health 7 + new tests.
-3. Boot actual Public standalone stack using genuinely free **isolated** ports (example Task API 8803, Agent 8904, Vite 8975) with `TASK_API_BASE_URL` pointing at isolated Task API; environment-only Vite overrides `PO_AGENT_DEV_UI_PORT=8975`, `PO_AGENT_DEV_PROXY_PORT=8904`. Confirm **real request `/api/v1/health` through isolated Vite proxy** is served by isolated Public Agent, not Review. Validate via source and unique port fingerprints; don't conflate agents. Check `Vite /api` no 502. Never terminate running Review.
-4. Run Public `public_health_check.py` against explicit isolated ports with real source code and LLM probe if safely authorized, H0–H6, expecting GREEN per checkpoint. Verify H4 on HTML GET, not JSON. A successful H4 is SPA HTML smoke, **not proof that the browser works**: optionally run Playwright DOM on real task result with no planner JSON, candidates and sources. If browser automation not available, mark browser UI separately NOT VERIFIED.
-5. Verify MCP 49 tools; public-deploy and public-health-check skills retained, Core V4 6/6 byte-identical to Public main, 4 experimental flags default OFF, configurable product spaces, no unbounded AS21 reads or modifications.
-6. Bounded independent REAL AS21 A/B for at least one task read, worklogs, task type and hierarchy as permitted; evidence/complete pagination, no silent-zero. Existing Review LLM 429-blocked multi-turn scenarios remain OPEN unless actually run on Public.
-7. Cleanup ONLY test-created temp services and temp files. No access to Review process PIDs or its ports. Report TESTED_HEAD, security, Core, test counts, 49 tools, exact H0–H6, Vite /api reverse-proxy evidence, independent A/B, browser status, remaining OPEN, and clear `PUBLIC_RELEASE_GREEN` only if mandatory criteria genuinely proved, otherwise `RELEASE_INCOMPLETE`/RED. No code edits. STOP.
+### Gate B: release integration / reproducibility
+1. Recheck PR #3 and PR #4 dependency/stacking, GitHub Actions six jobs for TESTED_HEAD, `prepublish_scan.py` exit 0, complete offline suites, 49 MCP tools, read-only Task API, four experimental flags default OFF and public configurable products. Preserve six Core blobs byte-identical to Public main.
+2. Verify the `public-deploy` and `public-health-check` skills are installed and documented. The isolated alternate-port deployment validated in R2 is sufficient for functional deployment evidence. The canonical 8003/8004/5175 deployment on an otherwise empty host is **not verified**; do not stop existing services to test it. If no free separate host, mark canonical optional, not equivalent to failure of isolated functional deployment.
+3. If LLM endpoint stable and user consent/quotas permit, perform **bounded** remaining four E2E cases blocked by prior 429 on Public (lifetime-sprint clarification, multi-turn date clarification, person+status and creation period). Compare to independent REAL AS21 source, make exact source-completeness claims. Stop on 429 repeats; mark `LLM_E2E_UNVERIFIED` not GREEN if blocked. Never unbounded scan or AS21 write.
+4. Report `PUBLIC_RELEASE_GREEN` **only** when all mandatory security/build/offline/isolated H0–H6/real DOM and required bounded A/B gates pass without new regressions. Otherwise `RELEASE_INCOMPLETE` with clear first still-open blocker. Distinguish optional canonical port test and LLM coverage from mandatory release issues. No merge: owner decides separately.
 
-### GigaCode command
-Execute A230R3.8-R2-PUBLIC-ISOLATED-UI-REGATE from current Public GIGACODE_NEXT_ACTION.md. Fresh clone, free ports, H0-H6 + real isolated Vite /api proxy, full offline regression and Core 6/6. QA ONLY, no fixes/commits. Report and STOP.
+### Report
+Return exact TESTED_HEAD, official CI 6-job status and run URL or ID, browser method/provenance, test scenarios/passed/failed, source A/B, H0–H6, frozen Core 6/6, security and remaining OPEN, no secrets or PII. QA-only, stop. **No source changes.**
+
+### One-line command
+Execute A230R3.9-PUBLIC-BROWSER-DOM-RELEASE-GATE from Public GIGACODE_NEXT_ACTION.md. Independent real browser DOM on safe isolated Public, CI/security/regression verification and bounded read-only A/B. Report and STOP.
