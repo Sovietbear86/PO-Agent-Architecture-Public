@@ -6,3 +6,4 @@ pydantic>=2.7
 pydantic-settings>=2.2
 requests>=2.31
 fastmcp>=2.0
+PyYAML>=6.0
