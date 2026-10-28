@@ -65,6 +65,53 @@ class HealthCheckTests(unittest.TestCase):
         self.assertFalse(health._agent_query({**valid, "status": "FAILED"})[0])
         self.assertFalse(health._agent_query({**valid, "runtime": "legacy_harness"})[0])
 
+    def test_h4_uses_html_accept_and_recognizes_vite_root(self):
+        args = argparse.Namespace(
+            task_api_url="http://127.0.0.1:8003",
+            agent_url="http://127.0.0.1:8904",
+            frontend_url="http://127.0.0.1:8975",
+            task_code=None, probe_agent=False, timeout=1.0, agent_timeout=1.0,
+        )
+        seen = []
+
+        def fake_check(name, url, valid, **kwargs):
+            seen.append((name, url, kwargs.get("accept")))
+            if name == "H4_FRONTEND":
+                ok, detail = valid('<!doctype html><html><div id="root"></div></html>')
+                return {"name": name, "status": "GREEN" if ok else "RED",
+                        "http": 200, "elapsed_ms": 1, "detail": detail}
+            return {"name": name, "status": "GREEN", "http": 200,
+                    "elapsed_ms": 1, "detail": "OK"}
+
+        with patch.object(health, "_check", side_effect=fake_check):
+            result = health.run(args)
+        self.assertEqual(result["verdict"], "INCOMPLETE")  # no source or LLM probe
+        self.assertIn(("H4_FRONTEND", "http://127.0.0.1:8975/", "text/html"), seen)
+        self.assertTrue(all(accept is None for name, _, accept in seen if name != "H4_FRONTEND"))
+
+    def test_html_accept_header_is_propagated(self):
+        from io import BytesIO
+
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "text/html"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, *_):
+                return b'<html><div id="root"></div></html>'
+
+        with patch.object(health, "urlopen", return_value=FakeResponse()) as mocked:
+            status, body, error = health._fetch("http://127.0.0.1:8975/",
+                                               accept="text/html")
+        self.assertEqual((status, error), (200, None))
+        self.assertIn('id="root"', body)
+        self.assertEqual(mocked.call_args.args[0].get_header("Accept"), "text/html")
+
     def test_no_raw_exception_or_http_body_in_error(self):
         # _fetch never reads HTTP error response bodies.
         from io import BytesIO
