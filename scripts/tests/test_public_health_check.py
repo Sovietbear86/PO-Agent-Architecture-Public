@@ -65,6 +65,26 @@ class HealthCheckTests(unittest.TestCase):
         self.assertFalse(health._agent_query({**valid, "status": "FAILED"})[0])
         self.assertFalse(health._agent_query({**valid, "runtime": "legacy_harness"})[0])
 
+    def test_h3_cold_source_health_has_bounded_transport_margin(self):
+        args = argparse.Namespace(
+            task_api_url="http://127.0.0.1:8003",
+            agent_url="http://127.0.0.1:8904",
+            frontend_url="http://127.0.0.1:8975",
+            task_code=None, probe_agent=False, timeout=15.0, agent_timeout=30.0,
+        )
+        observed = {}
+
+        def capture(name, *a, **kw):
+            observed[name] = kw.get("timeout")
+            return {"name": name, "status": "GREEN", "http": 200,
+                    "elapsed_ms": 1, "detail": "OK"}
+
+        with patch.object(health, "_check", side_effect=capture):
+            health.run(args)
+        self.assertEqual(observed["H3_AGENT_V4"], 20.0)
+        self.assertEqual(observed["H2_MCP"], 15.0)
+        self.assertEqual(observed["H4_FRONTEND"], 15.0)
+
     def test_h4_uses_html_accept_and_recognizes_vite_root(self):
         args = argparse.Namespace(
             task_api_url="http://127.0.0.1:8003",
