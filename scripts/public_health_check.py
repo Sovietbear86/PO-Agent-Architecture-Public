@@ -161,8 +161,10 @@ def run(args: argparse.Namespace) -> dict:
                          timeout=args.timeout))
     checks.append(_check("H2_MCP", args.task_api_url + "/api/v1/swtr-read/health",
                          _mcp_health, timeout=args.timeout))
+    # The Agent source probe may cold-start stdio MCP (up to 15s); allow bounded
+    # transport overhead without weakening the real source-health requirement.
     checks.append(_check("H3_AGENT_V4", args.agent_url + "/api/v1/health",
-                         _agent_health, timeout=args.timeout))
+                         _agent_health, timeout=max(args.timeout, 20.0)))
     checks.append(_check("H4_FRONTEND", args.frontend_url + "/", _frontend,
                          timeout=args.timeout, accept="text/html"))
     if args.task_code:
