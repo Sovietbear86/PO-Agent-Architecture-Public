@@ -1,28 +1,22 @@
 # GigaCode — CURRENT NEXT ACTION
 
-## A230R3.9-PUBLIC-BROWSER-DOM-RELEASE-GATE — independent QA only
+## A230R3.9-R2-PUBLIC-HEALTH-COLD-STDIO-REGATE — independent QA
 
-**Do not change production code, Core, tests, docs, git history, PRs, configs, credentials or AS21. No commits/merges/pushes.** Preserve user's running Review services and working tree. Fetch remote, confirm exact `LOCAL_HEAD = REMOTE_HEAD = TESTED_HEAD` on Public `feat/a230r3-community-migration`; work in isolated temporary clone with temporary services only. Parent PR #3 / PR #4 remain Draft until owner release.
+**ONLY QA.** Do not modify code, tests, docs, Core V4, or config. No commit/push/merge. Do not stop user Review services; keep existing Review branch/worktree unchanged. Public PR #3 and PR #4 remain Draft. Fetch origin and prove LOCAL_HEAD=REMOTE_HEAD=TESTED_HEAD for Public `feat/a230r3-community-migration`.
 
-### Proven baseline
-- A230R3.8-R2 on `7fbb47f`: independent Security Scan GREEN; clean dependencies and offline tests GREEN, V4 50/50; Task API 15/15; health-check 9/9; 49 MCP tools; 14 plugins / 73 skills / 75 capabilities / 70 UI; frozen Public Core V4 6/6. Isolated Public stack on independently available local ports: H0–H6 GREEN (exit 0), REAL AS21 bounded A/B (task type, hierarchy, author/date worklogs) GREEN; isolated Vite `/api` routed to **isolated** Public Agent, not Review. All existing Review services untouched. This is *not yet* browser DOM proof.
-- Independently checked GitHub Actions: `Community CI` run **40756533616** for `7fbb47f` completed **success**, all six jobs GREEN: `sanitize`, `backend`, `frontend`, `health-tool`, `offline-agent-regression`, `offline-task-api-regression`. Recheck status for actual tested HEAD if changed.
-- R2 `RELEASE_INCOMPLETE` because browser DOM (Playwright/Puppeteer unavailable in that environment), canonical default-port clean host deployment not executed, and 4 historical LLM 429 E2E cases remain open.
+### Evidence and issue
+- Prior A230R3.9 browser DOM tests on `d8c7cd0` were GREEN: all 6 tabs, task/type/hierarchy/worklog/assignee candidates, no raw planner JSON, bounded REAL AS21 parity; GitHub six-job CI GREEN. LLM 429 cleared for 3 of 4 cases, fourth created-date case PARTIAL due known regex/slow source.
+- **Official H0–H6 returned RED solely at H3**. `source_health()` in `po-agent-platform-v2/src/po_agent/adapters/task_api.py` previously capped probe timeout at 5.0s, but bounded cold stdio MCP round-trip can take ~9–10s. Agent `/api/v1/health` marked source degraded with `ReadTimeout`, while H2/H5/H6 direct real reads were all GREEN.
+- Owner outside-Core fix `cac76e5`: raised **bounded cap** from 5.0s to 15.0s (still min(base timeout, 15)). No API, MCP or Core changes. This change requires independent verification; do NOT claim success from code review alone.
+- Known broader Review incident (FAILED task query + stale snapshot refresh) remains independently open; this Public H3 change is not a proven fix for Review.
 
-### Gate A: real browser DOM (primary objective)
-1. Assess available browser automation without installing intrusive/untrusted software. Prefer existing headless Chromium or Playwright in separate isolated environment. If unavailable, report `BROWSER_NOT_VERIFIED`; **do not** equate HTML H4 or proxy API response to DOM proof.
-2. Create safe isolated public clone and full stack (distinct free local loopback ports; no termination of Review). Observe browser console/network and confirm root rendering, navigation `Обзор`, `Задачи`, `Спринты`, `Релизы`, `Качество`; loading vs errors, session data isolation; no raw planner JSON displayed.
-3. Perform bounded authorized user-visible queries through UI for: task key/title, task type, hierarchy/epics, member worklogs for an explicit period, `team.assignee_recommendation` ranked `candidates`, sources/evidence, explicit empty result and fail-closed negative state. Compare visible business rows to source response counts (respect documented sample caps), confirm correct labels and no `capability_id/arguments/widget:/kind:` leaking.
-4. Verify Vite proxy `/api` is strictly Public isolated Agent using distinct port proof. Protect tokens; no raw AS21 payload/screenshot with personal identities in report.
+### Mandatory gates
+1. Exact owner diff vs `d8c7cd0`: prove only Task API adapter source-health timeout and this next_action changed. Frozen 6 Core V4 blobs must match Public main. `python3 scripts/prepublish_scan.py` exit 0.
+2. Test source-health cold startup and repeat (at least 3 times). Instrument or safely observe HTTP duration. All H0–H6 via **official** `scripts/public_health_check.py` against isolated Public stack must be GREEN (exit 0), including H3 `source_status=healthy`. No fake oracle. Test one deliberately slow >15s probe in offline synthetic test to prove fail-closed remains, and no tenant-wide scans/writes.
+3. Inspect actual `self._base_timeout_seconds`: verify >=15s in deployed settings for this scenario, since min(base,15) retains shorter configured timeouts. If base <15, classify as CONFIG/BLOCKER and provide correct safe owner change proposal; do not edit runtime code yourself.
+4. Full regression: declared dependencies, Agent V4, Task API, health tests, 49 MCP tools, frontend build, source scoped read-only, public-deploy and public-health-check skills retained, all 6 CI jobs for tested commit. Confirm no 429 and no extra LLM load; source checks bounded.
+5. Browser DOM coverage from previous run can be used only if no UI/proxy changes; sanity smoke as feasible. Test H3 & H5/H6 source consistency on the *same* isolated Public task-api and agent; verify no Review port access.
+6. Report exact tested HEAD, H0–H6 table, H3 warm/cold timing, failed boundary if any, security, Core 6/6, official CI results, and `PUBLIC_RELEASE_GREEN` only if mandatory gates all pass. Otherwise `RELEASE_INCOMPLETE` or RED. The four E2E cases include a known remaining creation-period limitation; classify open accurately. No PR merge. STOP.
 
-### Gate B: release integration / reproducibility
-1. Recheck PR #3 and PR #4 dependency/stacking, GitHub Actions six jobs for TESTED_HEAD, `prepublish_scan.py` exit 0, complete offline suites, 49 MCP tools, read-only Task API, four experimental flags default OFF and public configurable products. Preserve six Core blobs byte-identical to Public main.
-2. Verify the `public-deploy` and `public-health-check` skills are installed and documented. The isolated alternate-port deployment validated in R2 is sufficient for functional deployment evidence. The canonical 8003/8004/5175 deployment on an otherwise empty host is **not verified**; do not stop existing services to test it. If no free separate host, mark canonical optional, not equivalent to failure of isolated functional deployment.
-3. If LLM endpoint stable and user consent/quotas permit, perform **bounded** remaining four E2E cases blocked by prior 429 on Public (lifetime-sprint clarification, multi-turn date clarification, person+status and creation period). Compare to independent REAL AS21 source, make exact source-completeness claims. Stop on 429 repeats; mark `LLM_E2E_UNVERIFIED` not GREEN if blocked. Never unbounded scan or AS21 write.
-4. Report `PUBLIC_RELEASE_GREEN` **only** when all mandatory security/build/offline/isolated H0–H6/real DOM and required bounded A/B gates pass without new regressions. Otherwise `RELEASE_INCOMPLETE` with clear first still-open blocker. Distinguish optional canonical port test and LLM coverage from mandatory release issues. No merge: owner decides separately.
-
-### Report
-Return exact TESTED_HEAD, official CI 6-job status and run URL or ID, browser method/provenance, test scenarios/passed/failed, source A/B, H0–H6, frozen Core 6/6, security and remaining OPEN, no secrets or PII. QA-only, stop. **No source changes.**
-
-### One-line command
-Execute A230R3.9-PUBLIC-BROWSER-DOM-RELEASE-GATE from Public GIGACODE_NEXT_ACTION.md. Independent real browser DOM on safe isolated Public, CI/security/regression verification and bounded read-only A/B. Report and STOP.
+### Short GigaCode command
+Run A230R3.9-R2-PUBLIC-HEALTH-COLD-STDIO-REGATE from latest Public GIGACODE_NEXT_ACTION.md. Sync HEAD, independently test H3 cold/warm 15s bounded health and full H0–H6, regress/security/CI/Core. QA-only, report and STOP.
