@@ -165,6 +165,297 @@ def _source_task_code(item: dict[str, Any]) -> str | None:
     return None
 
 
+
+def _unwrap_task_unit(payload: Any) -> dict[str, Any] | None:
+    if isinstance(payload, dict):
+        code = payload.get("code")
+        if isinstance(code, str) and _TASK_CODE_RE.fullmatch(code.upper().strip()):
+            return payload
+        for key in ("unit", "task", "data", "content"):
+            if key in payload:
+                found = _unwrap_task_unit(payload.get(key))
+                if found is not None:
+                    return found
+    if isinstance(payload, list):
+        for item in payload:
+            found = _unwrap_task_unit(item)
+            if found is not None:
+                return found
+    return None
+
+
+def _task_codes_from_value(value: Any) -> list[str]:
+    found: list[str] = []
+
+    def visit(item: Any) -> None:
+        if isinstance(item, str):
+            text = item.upper().strip()
+            if _TASK_CODE_RE.fullmatch(text):
+                found.append(text)
+                return
+            for candidate in re.findall(r"\b[A-Z][A-Z0-9]*-\d+\b", item.upper()):
+                if _TASK_CODE_RE.fullmatch(candidate):
+                    found.append(candidate)
+            return
+        if isinstance(item, dict):
+            for child in item.values():
+                visit(child)
+            return
+        if isinstance(item, list):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return list(dict.fromkeys(found))
+
+
+def _normalized_relation_field(value: str) -> str:
+    return re.sub(r"[^a-z0-9а-яё]+", "_", value.casefold()).strip("_")
+
+
+def _relation_kind(field: str) -> str | None:
+    normalized = _normalized_relation_field(field)
+    if "epic" in normalized or "эпик" in normalized:
+        return "epic"
+    if "parent" in normalized or "родител" in normalized:
+        return "parent"
+    if any(token in normalized for token in (
+        "relation", "related", "link", "depend", "block", "hierarch",
+        "связ", "завис", "блок", "иерарх",
+    )):
+        return "related"
+    return None
+
+
+def _task_relation_facts(unit: dict[str, Any]) -> dict[str, Any]:
+    current = str(unit.get("code") or "").upper().strip()
+    parent_candidates: list[str] = []
+    epic_candidates: list[str] = []
+    related_keys: list[str] = []
+    source_fields_seen: list[str] = []
+    relation_rows: list[dict[str, Any]] = []
+
+    def absorb(field: str, value: Any, *, origin: str) -> None:
+        kind = _relation_kind(field)
+        if kind is None:
+            return
+        source_fields_seen.append(f"{origin}:{field}")
+        keys = [code for code in _task_codes_from_value(value) if code != current]
+        target = parent_candidates if kind == "parent" else epic_candidates if kind == "epic" else related_keys
+        for code in keys:
+            if code not in target:
+                target.append(code)
+            relation_rows.append({
+                "key": code,
+                "relation": kind,
+                "source_field": field,
+                "origin": origin,
+            })
+
+    for field, value in unit.items():
+        if field == "attributes":
+            continue
+        absorb(str(field), value, origin="unit")
+
+    raw_attrs = unit.get("attributes")
+    if isinstance(raw_attrs, list):
+        for item in raw_attrs:
+            if not isinstance(item, dict):
+                continue
+            field = item.get("code")
+            if not isinstance(field, str):
+                descriptor = item.get("attribute")
+                field = descriptor.get("code") if isinstance(descriptor, dict) else None
+            if isinstance(field, str):
+                absorb(field, item.get("value"), origin="attribute")
+
+    parent_candidates = list(dict.fromkeys(parent_candidates))
+    epic_candidates = list(dict.fromkeys(epic_candidates))
+    related_keys = list(dict.fromkeys(
+        code for code in related_keys
+        if code not in parent_candidates and code not in epic_candidates
+    ))
+    source_fields_seen = list(dict.fromkeys(source_fields_seen))
+
+    return {
+        "schema_proven": bool(source_fields_seen),
+        "parent_key": parent_candidates[0] if len(parent_candidates) == 1 else None,
+        "parent_candidates": parent_candidates,
+        "parent_ambiguous": len(parent_candidates) > 1,
+        "epic_key": epic_candidates[0] if len(epic_candidates) == 1 else None,
+        "epic_candidates": epic_candidates,
+        "epic_ambiguous": len(epic_candidates) > 1,
+        "related_keys": related_keys,
+        "relations": relation_rows,
+        "source_fields_seen": source_fields_seen,
+    }
+
+def _link_endpoint_code(value: Any) -> str | None:
+    if isinstance(value, str):
+        text = value.upper().strip()
+        return text if _TASK_CODE_RE.fullmatch(text) else None
+    if isinstance(value, dict):
+        for key in ("code", "unitCode", "taskCode", "id", "value"):
+            candidate = value.get(key)
+            if isinstance(candidate, str):
+                text = candidate.upper().strip()
+                if _TASK_CODE_RE.fullmatch(text):
+                    return text
+    return None
+
+
+def _link_type_code(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip().casefold()
+    if isinstance(value, dict):
+        for key in ("code", "name", "value", "id"):
+            candidate = value.get(key)
+            if candidate not in (None, ""):
+                return str(candidate).strip().casefold()
+    return ""
+
+
+def _task_link_facts(task_code: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Normalize authoritative MCP get_unit_links rows for one task.
+
+    Source semantics proven by A229S1:
+    - decomposition: source = parent, destination = child;
+    - realized_in: source points to an epic/realization target;
+    - every other connected link is exposed as related, never promoted to a
+      structural parent.
+    """
+    current = task_code.upper().strip()
+    parents: list[str] = []
+    epics: list[str] = []
+    related: list[str] = []
+    relations: list[dict[str, Any]] = []
+    link_types_seen: list[str] = []
+
+    for row in rows:
+        if not isinstance(row, dict) or bool(row.get("deleted", False)):
+            continue
+        source = _link_endpoint_code(row.get("source"))
+        destination = _link_endpoint_code(row.get("destination"))
+        link_type = _link_type_code(row.get("type"))
+        if not source or not destination or current not in {source, destination}:
+            continue
+
+        other = destination if source == current else source
+        direction = "outgoing" if source == current else "incoming"
+        if link_type:
+            link_types_seen.append(link_type)
+
+        relation = "related"
+        if link_type == "decomposition":
+            if destination == current:
+                relation = "parent"
+                if source not in parents:
+                    parents.append(source)
+            else:
+                relation = "child"
+                if other not in related:
+                    related.append(other)
+        elif link_type == "realized_in":
+            if source == current:
+                relation = "epic"
+                if destination not in epics:
+                    epics.append(destination)
+            else:
+                relation = "realized_child"
+                if other not in related:
+                    related.append(other)
+        else:
+            if other not in related:
+                related.append(other)
+
+        relations.append({
+            "key": other,
+            "relation": relation,
+            "link_type": link_type or None,
+            "source": source,
+            "destination": destination,
+            "direction": direction,
+            "origin": "mcp:get_unit_links",
+        })
+
+    # Do not duplicate structural parent/epic nodes in the generic related set.
+    related = [
+        key for key in dict.fromkeys(related)
+        if key not in set(parents) and key not in set(epics)
+    ]
+    parents = list(dict.fromkeys(parents))
+    epics = list(dict.fromkeys(epics))
+    link_types_seen = list(dict.fromkeys(link_types_seen))
+
+    return {
+        # The get_unit_links endpoint itself is the authoritative relation
+        # contract, so an empty complete response is a proven empty relation set.
+        "schema_proven": True,
+        "parent_key": parents[0] if len(parents) == 1 else None,
+        "parent_candidates": parents,
+        "parent_ambiguous": len(parents) > 1,
+        "epic_key": epics[0] if len(epics) == 1 else None,
+        "epic_candidates": epics,
+        "epic_ambiguous": len(epics) > 1,
+        "related_keys": related,
+        "relations": relations,
+        "source_fields_seen": [
+            "mcp:get_unit_links",
+            *[f"link_type:{item}" for item in link_types_seen],
+        ],
+    }
+
+
+async def _get_unit_links_complete(
+    client: SWTRMCPClient,
+    task_code: str,
+    *,
+    page_size: int = 100,
+    max_pages: int = 20,
+) -> list[dict[str, Any]]:
+    """Read the complete bounded relation set using the live-proven MCP contract."""
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    page = 0
+    has_next = True
+
+    while has_next and page < max_pages:
+        # A229S1R A/B source-forensics proved the live GetUnitLinksRequest
+        # contract is flat. Keep this DTO exact: nested unitId/page shapes are
+        # rejected by FastMCP before the request reaches AS21.
+        arguments = {
+            "request": {
+                "unit_code": task_code,
+                "link_types": [],
+                "page": page,
+                "size": page_size,
+            }
+        }
+        content = await client.call_tool("get_unit_links", arguments)
+        payload = _parse_tool_content(content)
+        page_rows = _page_content(payload)
+        for row in page_rows:
+            source = _link_endpoint_code(row.get("source"))
+            destination = _link_endpoint_code(row.get("destination"))
+            link_type = _link_type_code(row.get("type"))
+            if not source or not destination:
+                continue
+            marker = (source, destination, link_type)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            rows.append(row)
+        has_next = _page_meta(payload)["has_next"]
+        page += 1
+
+    if has_next:
+        raise HTTPException(
+            status_code=502,
+            detail=f"SWTR get_unit_links pagination exceeded max_pages for {task_code}",
+        )
+    return rows
+
+
 def _raw_attribute_entries(item: dict[str, Any]) -> list[tuple[str, Any]]:
     """Attribute ``(code, value)`` pairs from a source row.
 
@@ -266,6 +557,17 @@ def _canonical_sprint_task_row(item: dict[str, Any]) -> dict[str, Any] | None:
     status = _status_identifier(attrs.get("workflow_status", unit.get("workflow_status")))
     sprint_id = _relation_identifier(attrs.get("scrum_board_plugin_sprint"))
     release_id = _relation_identifier(attrs.get("fix_version_s"))
+    suit_value = pick("suit")
+    task_type_code = None
+    task_type_name = None
+    if isinstance(suit_value, dict):
+        raw_code = suit_value.get("code") or suit_value.get("id")
+        raw_name = suit_value.get("name") or suit_value.get("title")
+        task_type_code = str(raw_code).strip() if raw_code not in (None, "") else None
+        task_type_name = str(raw_name).strip() if raw_name not in (None, "") else None
+    elif isinstance(suit_value, str) and suit_value.strip():
+        task_type_code = suit_value.strip()
+        task_type_name = suit_value.strip()
     # Normalize to the flat ``{"code","value"}`` contract that downstream
     # readers (agent ``_attributes``) expect, so workflow semantics such as
     # ``workflow_status.statusType`` survive the canonical row boundary.
@@ -277,9 +579,12 @@ def _canonical_sprint_task_row(item: dict[str, Any]) -> dict[str, Any] | None:
         "source_id": code,
         "title": title,
         "status": status,
+        "task_type_code": task_type_code,
+        "task_type_name": task_type_name,
         "source": "swtr",
         "source_data": {
             "swtr_space": space,
+            "swtr_suit": suit_value,
             "workflow_status": status,
             "swtr_attributes": swtr_attributes,
             "sprint_id": sprint_id,
@@ -321,6 +626,7 @@ async def _tql_sprint_tasks(
                         "attributes": [
                             "code",
                             "summary",
+                            "suit",
                             "space",
                             "workflow_status",
                             "scrum_board_plugin_sprint",
@@ -588,6 +894,53 @@ def _normalize_worklog_entry(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@router.get("/tasks/{task_code}/relations")
+async def get_task_relations(task_code: str):
+    """Return authoritative parent/epic/linked-task facts from REAL AS21.
+
+    Relations are NOT stored in read_unit attributes in the certified source
+    contract. The authoritative source is MCP get_unit_links. read_unit is used
+    only for the task's own type (suit), never as a relation fallback.
+    """
+    normalized = task_code.upper().strip()
+    if not _TASK_CODE_RE.fullmatch(normalized):
+        raise HTTPException(status_code=400, detail="Invalid SWTR task code")
+
+    client = SWTRMCPClient()
+    try:
+        unit_content = await client.call_tool("read_unit", {"code": normalized})
+        link_rows = await _get_unit_links_complete(client, normalized)
+    except (SWTRMCPUnavailable, SWTRMCPProtocolError) as exc:
+        raise _transport_http_error(exc) from exc
+
+    payload = _parse_tool_content(unit_content)
+    unit = _unwrap_task_unit(payload)
+    if unit is None:
+        raise HTTPException(status_code=502, detail="SWTR read_unit returned no canonical task unit")
+
+    suit = unit.get("suit")
+    type_code = None
+    type_name = None
+    if isinstance(suit, dict):
+        raw_code = suit.get("code") or suit.get("id")
+        raw_name = suit.get("name") or suit.get("title")
+        type_code = str(raw_code).strip() if raw_code not in (None, "") else None
+        type_name = str(raw_name).strip() if raw_name not in (None, "") else None
+    elif isinstance(suit, str) and suit.strip():
+        type_code = suit.strip()
+        type_name = suit.strip()
+
+    facts = _task_link_facts(normalized, link_rows)
+    return {
+        "task_code": normalized,
+        "source": "REAL_AS21",
+        "relation_source": "mcp:get_unit_links",
+        "task_type_code": type_code,
+        "task_type_name": type_name,
+        **facts,
+    }
+
+
 @router.get("/tasks/{task_code}/work-logs")
 async def get_task_work_logs(
     task_code: str,
@@ -635,6 +988,96 @@ async def get_task_work_logs(
         "complete": not has_next,
         "pages_read": page,
         "convention": {"worklog_day_hours": 8, "worklog_week_days": 5},
+    }
+
+
+@router.get("/work-logs/report")
+async def get_person_worklogs_report(
+    user: str = Query(..., min_length=1, max_length=120),
+    date_from: str = Query(..., alias="from"),
+    date_to: str = Query(..., alias="to"),
+    space: str | None = Query(None, min_length=1, max_length=100),
+    unit: str | None = Query(None, min_length=1, max_length=100),
+    page: int = Query(0, ge=0, le=99),
+    size: int = Query(50, ge=1, le=100),
+):
+    """One bounded page of REAL AS21 worklogs, attributed to their AUTHOR.
+
+    Dates are worklog logged-on dates, not task creation dates. This endpoint
+    never broadens author/scope filters, reports source failures as failures,
+    and intentionally does not perform tenant-wide scans or per-task fanout.
+    """
+    from datetime import date
+
+    canonical_author = user.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]{1,120}", canonical_author):
+        raise HTTPException(status_code=400, detail="Canonical worklog author externalId is required")
+    try:
+        start = date.fromisoformat(date_from)
+        finish = date.fromisoformat(date_to)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Valid YYYY-MM-DD from/to dates are required") from exc
+    if start > finish or (finish - start).days > 366 or finish > date.today():
+        raise HTTPException(status_code=400, detail="Worklog period must be ordered, <=366 days, and not in future")
+    arguments: dict[str, Any] = {
+        "user_external_id": canonical_author,
+        "date_from": start.isoformat(),
+        "date_to": finish.isoformat(),
+        "page": page,
+        "size": size,
+    }
+    for key, raw in (("space", space), ("unit", unit)):
+        if raw is not None:
+            code = raw.strip()
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", code):
+                raise HTTPException(status_code=400, detail=f"Invalid {key} identifier")
+            arguments[key] = code
+
+    try:
+        payload = _parse_tool_content(
+            await SWTRMCPClient().call_tool("get_work_report_filter", arguments)
+        )
+    except (SWTRMCPUnavailable, SWTRMCPProtocolError) as exc:
+        raise _transport_http_error(exc) from exc
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("content"), list):
+        raise HTTPException(status_code=502, detail="Incomplete or invalid AS21 report payload")
+    meta = _page_meta(payload)
+    if not any(k in payload for k in ("hasNext", "has_next")) or meta["page"] is None:
+        raise HTTPException(status_code=502, detail="AS21 report pagination is unproven")
+    if not isinstance(meta["page"], int) or meta["page"] != page:
+        raise HTTPException(status_code=502, detail="AS21 report page mismatch")
+    rows = payload["content"]
+    if any(not isinstance(row, dict) for row in rows) or len(rows) > size:
+        raise HTTPException(status_code=502, detail="AS21 report rows exceed verified page bounds")
+    entries = []
+    for row in rows:
+        item = _normalize_worklog_entry(row)
+        external_id = item["user"].get("external_id")
+        if not isinstance(external_id, str) or external_id.casefold() != canonical_author.casefold():
+            raise HTTPException(status_code=502, detail="AS21 worklog author mismatch")
+        logged_on = item.get("date")
+        if not isinstance(logged_on, str) or not start.isoformat() <= logged_on[:10] <= finish.isoformat():
+            raise HTTPException(status_code=502, detail="AS21 worklog date outside bounded interval")
+        if item["duration_hours"] is None:
+            raise HTTPException(status_code=502, detail="AS21 worklog duration is incomplete")
+        entries.append(item)
+    return {
+        "source": "REAL_AS21",
+        "author_external_id": canonical_author,
+        "date_from": start.isoformat(),
+        "date_to": finish.isoformat(),
+        "space": space,
+        "unit": unit,
+        "page": page,
+        "page_size": size,
+        "has_next": meta["has_next"],
+        "complete": not meta["has_next"],
+        "worklog_count": len(entries),
+        "page_hours": round(sum(item["duration_hours"] for item in entries), 6),
+        "entries": entries,
+        "attribution": "worklog_author_external_id",
+        "date_semantics": "logged_on_not_created",
     }
 
 
@@ -767,9 +1210,11 @@ async def get_sprint_tasks(
     page: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     complete: bool = Query(False),
+    include_task_type: bool = Query(False),
     max_pages: int = Query(100, ge=1, le=500),
 ):
     normalized = sprint_id.strip()
+    include_type = include_task_type is True
     if not normalized or len(normalized) > 200:
         raise HTTPException(status_code=400, detail="Invalid sprint id")
     normalized_space = (space.upper().strip() if space else _infer_space_from_sprint(normalized))
@@ -890,7 +1335,12 @@ async def get_sprint_tasks(
     # key from the bounded sprint-constraint query; never change membership from
     # this enrichment and never fabricate missing timestamps.
     if canonical_rows and any(
-        row.get("created_at") is None or row.get("deadline") is None
+        row.get("created_at") is None
+        or row.get("deadline") is None
+        or (
+            include_type
+            and not (row.get("task_type_code") or row.get("task_type_name"))
+        )
         for row in canonical_rows
     ):
         enrichment_rows, _, _ = await _tql_sprint_tasks(
@@ -910,9 +1360,15 @@ async def get_sprint_tasks(
                 enriched = enrichment_by_code.get(code)
                 if enriched is None:
                     continue
-                for field in ("created_at", "updated_at", "deadline"):
+                for field in ("created_at", "updated_at", "deadline", "task_type_code", "task_type_name"):
                     if row.get(field) is None and enriched.get(field) is not None:
                         row[field] = enriched[field]
+                row_source = row.get("source_data") if isinstance(row.get("source_data"), dict) else {}
+                enriched_source = enriched.get("source_data") if isinstance(enriched.get("source_data"), dict) else {}
+                if not row_source.get("swtr_suit") and enriched_source.get("swtr_suit") is not None:
+                    row_source = dict(row_source)
+                    row_source["swtr_suit"] = enriched_source["swtr_suit"]
+                    row["source_data"] = row_source
 
     if is_complete:
         # The complete collection was produced by a source operation whose

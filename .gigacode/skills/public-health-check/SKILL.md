@@ -1,6 +1,6 @@
 ---
 name: public-health-check
-description: Многоуровневая проверка работоспособности публичного PO Agent: Task API, MCP-SWTR, 48 инструментов, REAL AS21, Agent Core V4, OpenAI-compatible LLM и UI. Используй после public-deploy, при пустых данных AS21, 502/503 и проверке готовности релиза.
+description: Многоуровневая проверка работоспособности публичного PO Agent: Task API, MCP-SWTR, 49 инструментов, REAL AS21, Agent Core V4, OpenAI-compatible LLM и UI. Используй после public-deploy, при пустых данных AS21, 502/503 и проверке готовности релиза.
 ---
 
 # Public Health Check — GigaCode skill
@@ -39,7 +39,7 @@ python3 scripts/public_health_check.py \
 |---|---|---|
 | H0 — Prerequisites | Наличие public checkout, MCP Python 3.13 и настроенных локальных env **без их отображения** | отсутствует MCP runtime/неверный путь/нет Python |
 | H1 — Task API | `GET http://127.0.0.1:8003/health` и `status=healthy` | процесс не запущен/порт/503 |
-| H2 — MCP | `GET http://127.0.0.1:8003/api/v1/swtr-read/health` → `status=connected`, рабочие read capabilities; ожидаем порядка 48 инструментов (изменения — сравнить с версией) | stdio wrapper/отсутствует TOKEN или BASE_URL/SSE не подключён |
+| H2 — MCP | `GET http://127.0.0.1:8003/api/v1/swtr-read/health` → `status=connected`, рабочие read capabilities; ожидаем порядка 49 инструментов (изменения — сравнить с версией) | stdio wrapper/отсутствует TOKEN или BASE_URL/SSE не подключён |
 | H3 — Agent V4 | `GET http://127.0.0.1:8004/api/v1/health` → `status=healthy`, `adapter=task-api`, `agent_core_v4_ready=true`, `source_status=healthy` | fake mode, неинициализирован Core V4, падение адаптера |
 | H4 — UI | `GET http://127.0.0.1:5175/` → HTML Vite; отдельно браузерный smoke | Vite/proxy на 8004/ошибки браузера |
 | H5 — REAL AS21 | `GET /api/v1/swtr-read/tasks/{task_code}`; код ответа совпадает, `unit.code` подтверждён источником | 401/403 token, VPN/DNS, 404 область доступа, 502 источник |

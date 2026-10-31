@@ -98,9 +98,12 @@ def _user_identity(value: Any) -> tuple[str | None, str | None, str | None]:
 
 
 def _rich_text_to_plain(value: Any) -> str | None:
-    """Normalize AS21 rich-text description payloads to readable text.
+    """Normalize AS21 rich-text/ProseMirror-like description payloads to text.
 
-    The raw source payload is preserved separately in Task.source_data.
+    Description may arrive as plain text or as a serialized
+    document tree (type=doc/content/paragraph/text/marks).  Canonical Task
+    consumers need readable text, while the raw source structure remains
+    preserved untouched in Task.source_data for audit/evidence.
     """
     if value is None:
         return None
@@ -162,6 +165,8 @@ def _rich_text_to_plain(value: Any) -> str | None:
 
     content = value.get("content")
     if not isinstance(content, list):
+        # Unknown structural node: fail soft to common scalar display fields,
+        # never stringify the whole dict into user-facing canonical text.
         for key in ("text", "name", "label", "value"):
             candidate = value.get(key)
             if isinstance(candidate, (str, int, float)) and str(candidate).strip():
@@ -185,6 +190,19 @@ def _rich_text_to_plain(value: Any) -> str | None:
     if node_type in {"doc", "table", "tableRow", "panel"}:
         return "\n".join(child_parts).strip()
     return "".join(child_parts).strip()
+
+
+def _task_type_identity(value: Any) -> tuple[str | None, str | None]:
+    if isinstance(value, str):
+        text = value.strip()
+        return (text or None, text or None)
+    if not isinstance(value, dict):
+        return None, None
+    code = value.get("code") or value.get("id") or value.get("value")
+    name = value.get("name") or value.get("title") or value.get("label")
+    code_text = str(code).strip() if isinstance(code, (str, int)) and str(code).strip() else None
+    name_text = str(name).strip() if isinstance(name, (str, int)) and str(name).strip() else None
+    return code_text, name_text
 
 
 def _string_list(value: Any) -> list[str]:
@@ -428,11 +446,12 @@ class TaskApiAS21Adapter(AS21Adapter):
         """Probe the certified Task API source-health endpoint without scanning tasks.
 
         Readiness must never issue an unscoped factual collection query merely
-        to prove liveness. This lightweight probe is operational metadata only.
+        to prove liveness. This lightweight probe is operational metadata only. The bounded 15s cap
+        accommodates cold stdio MCP initialization without unscoped reads.
         """
         response = await self._client.get(
             "/api/v1/swtr-read/health",
-            timeout=httpx.Timeout(min(self._base_timeout_seconds, 5.0)),
+            timeout=httpx.Timeout(min(self._base_timeout_seconds, 15.0)),
         )
         response.raise_for_status()
         payload = response.json()
@@ -552,6 +571,23 @@ class TaskApiAS21Adapter(AS21Adapter):
             if attrs.get("sber_component") is not None
             else source_data.get("sber_component")
         )
+        suit_value = (
+            data.get("suit")
+            if data.get("suit") is not None
+            else source_data.get("swtr_suit")
+        )
+        task_type_code = (
+            str(data.get("task_type_code")).strip()
+            if data.get("task_type_code") not in (None, "")
+            else None
+        )
+        task_type_name = (
+            str(data.get("task_type_name")).strip()
+            if data.get("task_type_name") not in (None, "")
+            else None
+        )
+        if not task_type_code and not task_type_name:
+            task_type_code, task_type_name = _task_type_identity(suit_value)
         task = Task(
             key=source_id,
             id=source_id,
@@ -570,6 +606,8 @@ class TaskApiAS21Adapter(AS21Adapter):
             project_space=project_space,
             sprint_id=sprint_id,
             release_id=release_id,
+            task_type_code=task_type_code,
+            task_type_name=task_type_name,
             labels=labels,
             components=components,
             source=data.get("source", "swtr") or "swtr",
@@ -646,6 +684,77 @@ class TaskApiAS21Adapter(AS21Adapter):
     async def get_release_tasks(self, release_id: str, space: Optional[str] = None) -> list[Task]:
         query = f"release = {release_id}" if not space else f"project = {space} AND release = {release_id}"
         return await self.search_tasks(query, max_results=self._scan_limit)
+
+    async def get_task_relations(self, task_key: str) -> dict[str, Any]:
+        normalized = task_key.upper().strip()
+        if not re.fullmatch(r"[A-Z]+-\d+", normalized):
+            raise AS21SourceError(f"Invalid task key: {task_key}")
+        try:
+            response = await self._get_resilient(
+                f"/api/v1/swtr-read/tasks/{normalized}/relations"
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise AS21SourceError(f"Task {task_key} not found in SWTR relations") from exc
+            if exc.response.status_code in (502, 503, 504):
+                raise AS21SourceUnavailable(
+                    f"Task relation endpoint unavailable: HTTP {exc.response.status_code}"
+                ) from exc
+            raise AS21SourceError(
+                f"Task relation request failed: HTTP {exc.response.status_code}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise AS21SourceUnavailable(
+                f"Task relation request failed: {type(exc).__name__}"
+            ) from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AS21SourceError("Task relation endpoint returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise AS21SourceError("Task relation response must be a JSON object")
+
+        def keys(name: str) -> list[str]:
+            value = payload.get(name)
+            if not isinstance(value, list):
+                return []
+            return [
+                str(item).upper().strip()
+                for item in value
+                if isinstance(item, str) and re.fullmatch(r"[A-Z]+-\d+", item.upper().strip())
+            ]
+
+        parent_key = payload.get("parent_key")
+        epic_key = payload.get("epic_key")
+        return {
+            "task_code": normalized,
+            "source": payload.get("source") or "REAL_AS21",
+            "schema_proven": bool(payload.get("schema_proven")),
+            "task_type_code": payload.get("task_type_code"),
+            "task_type_name": payload.get("task_type_name"),
+            "parent_key": (
+                str(parent_key).upper().strip()
+                if isinstance(parent_key, str) and re.fullmatch(r"[A-Z]+-\d+", parent_key.upper().strip())
+                else None
+            ),
+            "parent_candidates": keys("parent_candidates"),
+            "parent_ambiguous": bool(payload.get("parent_ambiguous")),
+            "epic_key": (
+                str(epic_key).upper().strip()
+                if isinstance(epic_key, str) and re.fullmatch(r"[A-Z]+-\d+", epic_key.upper().strip())
+                else None
+            ),
+            "epic_candidates": keys("epic_candidates"),
+            "epic_ambiguous": bool(payload.get("epic_ambiguous")),
+            "related_keys": keys("related_keys"),
+            "relations": payload.get("relations") if isinstance(payload.get("relations"), list) else [],
+            "source_fields_seen": (
+                [str(item) for item in payload.get("source_fields_seen", []) if isinstance(item, str)]
+                if isinstance(payload.get("source_fields_seen"), list)
+                else []
+            ),
+        }
 
     async def get_task_history(self, task_key: str) -> list[StatusTransition]:
         normalized = task_key.upper().strip()
@@ -747,6 +856,72 @@ class TaskApiAS21Adapter(AS21Adapter):
             "pages_read": payload.get("pages_read"),
             "convention": payload.get("convention") if isinstance(payload.get("convention"), dict) else {},
         }
+
+
+    async def get_member_worklogs_period(
+        self, member_login: str, date_from: str, date_to: str,
+        *, space: str | None = None, unit: str | None = None,
+        max_pages: int = 20,
+    ) -> dict[str, Any]:
+        """Fully bounded, fail-closed author/date collection from REAL AS21.
+
+        One server-filtered request per page, no per-task fanout, no unscoped
+        reads. Worklog author externalId is independent of task assignment.
+        """
+        import re as _re
+        canonical = member_login.strip()
+        if not _re.fullmatch(r"[A-Za-z0-9_.@-]{1,120}", canonical):
+            raise AS21SourceError("Canonical worklog author is required")
+        if not 1 <= max_pages <= 20:
+            raise AS21SourceError("Worklog page budget invalid")
+        entries: list[dict[str, Any]] = []
+        for page in range(max_pages):
+            params: dict[str, Any] = {
+                "user": canonical, "from": date_from, "to": date_to,
+                "page": page, "size": 50,
+            }
+            if space:
+                params["space"] = space
+            if unit:
+                params["unit"] = unit
+            try:
+                response = await self._get_resilient("/api/v1/swtr-read/work-logs/report", params=params)
+                payload = response.json()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (502, 503, 504, 429):
+                    raise AS21SourceUnavailable(
+                        f"Worklog report source unavailable: HTTP {exc.response.status_code}"
+                    ) from exc
+                raise AS21SourceError(
+                    f"Worklog report rejected: HTTP {exc.response.status_code}"
+                ) from exc
+            except (httpx.HTTPError, ValueError) as exc:
+                raise AS21SourceUnavailable("Worklog report source unavailable or returned invalid JSON") from exc
+            if not isinstance(payload, dict) or payload.get("source") != "REAL_AS21":
+                raise AS21SourceUnavailable("Worklog report lacks REAL AS21 provenance")
+            if (payload.get("author_external_id", "").casefold() != canonical.casefold()
+                or payload.get("date_from") != date_from or payload.get("date_to") != date_to
+                or payload.get("page") != page or not isinstance(payload.get("has_next"), bool)):
+                raise AS21SourceUnavailable("Worklog report filters or pagination did not match the request")
+            rows = payload.get("entries")
+            if not isinstance(rows, list) or len(rows) > 50:
+                raise AS21SourceUnavailable("Worklog report page has unbounded or missing rows")
+            entries.extend(rows)
+            if not payload["has_next"]:
+                if any(not isinstance(row.get("duration_hours"), (int, float)) for row in entries
+                       if isinstance(row, dict)) or any(not isinstance(row, dict) for row in entries):
+                    raise AS21SourceUnavailable("Worklog report contains incomplete duration")
+                return {
+                    "member_login": canonical, "date_from": date_from, "date_to": date_to,
+                    "space": space, "unit": unit, "entries": entries,
+                    "worklog_count": len(entries),
+                    "total_hours": round(sum(float(r["duration_hours"]) for r in entries), 6),
+                    "complete": True, "pages_read": page + 1,
+                    "source": "REAL_AS21",
+                    "attribution": "worklog_author_external_id",
+                    "date_semantics": "logged_on_not_created",
+                }
+        raise AS21SourceUnavailable("Worklog pagination exceeded 20 pages: completeness unproven")
 
 
     async def get_attachment_metadata(
