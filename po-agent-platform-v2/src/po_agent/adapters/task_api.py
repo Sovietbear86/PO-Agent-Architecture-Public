@@ -446,7 +446,8 @@ class TaskApiAS21Adapter(AS21Adapter):
         """Probe the certified Task API source-health endpoint without scanning tasks.
 
         Readiness must never issue an unscoped factual collection query merely
-        to prove liveness. This lightweight probe is operational metadata only. The bounded 15s cap\n        accommodates cold stdio MCP initialization without unscoped reads.
+        to prove liveness. This lightweight probe is operational metadata only. The bounded 15s cap
+        accommodates cold stdio MCP initialization without unscoped reads.
         """
         response = await self._client.get(
             "/api/v1/swtr-read/health",
