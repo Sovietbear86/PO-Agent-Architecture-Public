@@ -65,6 +65,24 @@ class Settings(BaseSettings):
         description="Enable additive Agent Core v4 skill-native POC endpoint/runtime",
         validation_alias=AliasChoices("AGENT_CORE_V4_ENABLED", "PO_AGENT_AGENT_CORE_V4_ENABLED"),
     )
+    # Experimental capabilities are opt-in and OFF for community deployments.
+    v4_synthesis_elision_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("V4_SYNTHESIS_ELISION", "PO_AGENT_V4_SYNTHESIS_ELISION"),
+    )
+    v4_goal_coverage_guard_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("V4_GOAL_COVERAGE_GUARD", "PO_AGENT_V4_GOAL_COVERAGE_GUARD"),
+    )
+    v4_goal_continuation_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("V4_GOAL_CONTINUATION", "PO_AGENT_V4_GOAL_CONTINUATION"),
+    )
+    v4_missing_goal_execution_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("V4_MISSING_GOAL_EXECUTION", "PO_AGENT_V4_MISSING_GOAL_EXECUTION"),
+    )
+
     swtr_base_url: str = Field(default="")
     swtr_token: Optional[str] = Field(default=None)
 
