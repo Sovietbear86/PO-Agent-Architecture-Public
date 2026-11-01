@@ -1,26 +1,21 @@
 # GigaCode — CURRENT NEXT ACTION
 
-## A230R3.9-R2-PUBLIC-H3-COLD-MCP-HEALTH-REGATE
+## A230R3.13-PUBLIC-P2-OS-QUICKSTART-QA
 
-**QA ONLY.** Do not change application code, configs, Core V4, tests, Git history, source/AS21 data. No commits, pushes or merges. Keep Review services and worktree untouched; maintain Public PR #3/#4 Draft. Use fresh isolated Public clone and free local ports, never stop user's running services.
+**Independent QA ONLY** on Public documentation PR from branch `docs/p2-cross-platform-quickstarts`. No production code edits, no commits/pushes/merges, no killing running services, no changes to REAL AS21 data or external access controls. Use clean disposable clones. This is a documentation and Skills QA, **not** authorization to deploy Public to a multi-user server.
 
-### Prior independent evidence
-A230R3.9 (TESTED_HEAD `d8c7cd0`) confirmed real Playwright Chromium browser DOM: six tabs, business rows, task types, hierarchies/epics, member worklogs, candidate recommendations, empty/error state and absence of raw planner JSON, correct Public Vite /api proxy. Bounded REAL AS21 oracle GREEN. GitHub six-job CI successful, security scan passed, Core 6/6 unchanged. Three of four previously blocked LLM E2E cases closed, fourth remained partial (plural-week parsing / created-date long source timeout). Report verdict RELEASE_INCOMPLETE due to official H3 source readiness failing at 5s cold stdio MCP initialization (while actual Task API, H5/H6, source reads GREEN). No code changes made by QA.
-Owner changes after `d8c7cd0`:
-- `cac76e5` raised **only health-probe** adapter bound from 5 to 15 seconds for real cold stdio (~9–10 s) without changing task reads; possible elapsed >15s at outer health client.
-- `6d42596` cleaned formatting of that docstring.
-- `9df478f` adds bounded 20s for **H3** of official health script only, preserving other probes default timeout and strict source-health validator.
-- `3ffd41e` adds offline assertions H3=20s, H2/H4=15s. All changes OUTSIDE frozen Core V4. Do not treat them as QA-verified until tests run.
+### Baseline
+- Public main after PR #3/#4 merged: `36be0493`. A230R3.12 reported POSTMERGE_GREEN: clean Public main 49 MCP tools, Core 6/6, offline Agent 50/50, Task API 15/15, health 10/10, H0–H6 cold+warm, browser/UI and bounded REAL AS21 A/B.
+- A230R3.12 macOS zsh local single-user workflow verified; Windows native PowerShell has known installation/wrapper/venv gaps. This PR deliberately documents **Windows 11 WSL2+Ubuntu**, NOT unsupported native PowerShell.
+- Owner adds `QUICKSTART_MACOS.md`, `QUICKSTART_WINDOWS.md` and cross-links in `DEPLOYMENT.md`, `.gigacode/skills/public-deploy/SKILL.md`, `.gigacode/skills/public-health-check/SKILL.md`. No Agent/Task API/MCP/Core changes intended.
 
-### R2 required gates
-1. `git fetch`, compare local=remote=running clone TESTED_HEAD. Identify exact production delta from `d8c7cd0` — health-probe budget and H3 check only. Verify six Core V4 Public blobs identical to Public main. Scan proposed PR branch with `python3 scripts/prepublish_scan.py` exit 0 and check internal secrets.
-2. Run GitHub Community CI for actual TESTED_HEAD (six jobs: sanitize, backend, frontend, health-tool, offline-agent-regression, offline-task-api-regression), full local available offline tests (prior V4 50/50, Task API 15/15, health 9/9; count changes). Do not fake success.
-3. Rebuild isolated Public stack with **own** MCP stdio, Task API, Agent, Vite proxy, never using Review services or occupied ports. On cold run (not prewarmed) time `/api/v1/swtr-read/health` and Agent `/api/v1/health`; verify H3 `source_status=healthy` from REAL AS21, not from fake/local source or a response copied from earlier cached check. Check no source mutation, no unbounded queries, no fabricated zero.
-4. Run official `scripts/public_health_check.py` with configured isolated URLs and one authorized existing task code + `--probe-agent`. Expect **H0–H6 GREEN, exit 0** in cold and warm conditions. Note timings. Verify H3 transport timeout remains bounded (20s), source probe 15s and frontend H4 uses text/html.
-5. Recheck real browser via existing Playwright (or equivalent) for at least task row, worklogs, sources, candidates, no raw planner JSON, `/api` strictly isolated Public proxy. Recheck independent bounded REAL AS21 A/B on one task; preserve previously observed R1 provenance without unnecessary repeat scans.
-6. Previously incomplete fourth LLM E2E: plural-week creation-period interpretation and explicit date continuation. If run, use max two bounded attempts and an independent source oracle; mark remaining source unavailable/timeouts and grammar gap as OPEN, don't broaden scope or assert this is fixed by H3 patch.
-7. Preserve known OPEN: Review reliability incident (separate), created-period plural-week grammar, session auth/ownership absent, full canonical default-port host test optional. GigaCode has no authorization to modify Review.
-8. Report TESTED_HEAD, security, exact tests/CI, cold+warmed H3 timings/status, H0–H6, UI browser smoke, 49 MCP tools, Core 6/6, AS21 A/B and any remaining release blockers. Return `PUBLIC_RELEASE_GREEN` only if all mandatory gates pass; else `RELEASE_INCOMPLETE` or `RED`. No commits, stop.
+### Gates
+1. **Source integrity**: git fetch; exact TESTED_HEAD and delta vs `main`. Only two new guides, `DEPLOYMENT.md`, both Skills and this spec. Public Core V4 6/6 byte-identical to main; `python3 scripts/prepublish_scan.py` exit 0, check no secrets/PII/internal hosts or unsafe instructions in changed docs.
+2. **Technical correctness (no invented success)**: cross-check every command/path/CLI flag against **actual Public main source**. Verify Python 3.13 runtime for stdio MCP, >=3.11 Agent/Task API, Node >=20, wrapper path, editable install extras, env locations, products.yaml, ports, Vite proxy, H0–H6 arguments, `--probe-agent`, 49 tools. Confirm source `.env` examples are safe for shell and no accidental token echo. Diagnose reproducibility of `npm ci`, venv commands and starting uvicorn from documented work directories. Treat unknown as NOT VERIFIED.
+3. **macOS test**: use clean isolated clone and own free ports to replay quickstart as documented where permitted; observe build, H0–H6 source and LLM only with authorized local access; no login/secrets printed. If complete real run unavailable, static path audit + previously verified A230R3.12 is evidence, not current guide QA GREEN.
+4. **Windows test**: if real Windows 11 WSL2 available, verify WSL preflight, Ubuntu dependencies, clone inside ext4, Python 3.13, 3 virtualenvs, Node/npm, Bash wrapper, secrets, 3 processes, local forwarding, 49 tools, H0–H6, browser. If no Windows environment, **NOT VERIFIED** explicitly; static cross-platform review may pass but must not declare Windows deployment GREEN. Native PowerShell is unsupported/NOT CERTIFIED.
+5. **Skills**: verify GigaCode recognizes `/public-deploy` and `/public-health-check` from Public clone and discovers both quickstarts by correct relative Markdown links; no use of Review's private environment. Each skill must fail closed if missing AS21/LLM credentials, must never commit .env or write to AS21, and must isolate ports.
+6. **CI/Regression**: run official GitHub CI for actual docs PR head if triggered and check full scan/build, no false green based only on merged main's old head. If relevant, run 49 tools and health check CLI offline tests. No code modifications by QA.
 
-### Command
-Run A230R3.9-R2-PUBLIC-H3-COLD-MCP-HEALTH-REGATE from Public GIGACODE_NEXT_ACTION.md. QA only. Fresh isolated cold and warm H0–H6, independent REAL AS21, 6-job CI, browser smoke and Core 6/6. No changes/commits. Report and STOP.
+### Report / STOP
+Return a table `Gate | TESTED_HEAD | evidence | status | first failure`, tested OS versions, exact commands corrected if needed, macOS confirmed/reused evidence vs Windows actual verification, Security Scan, Core 6/6, Skills resolution, CI status, remaining portability gaps. Verdict `DOCS_QA_GREEN / DOCS_QA_INCOMPLETE / RED`. No release claim for native PowerShell. STOP.

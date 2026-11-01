@@ -7,7 +7,7 @@
 - `/public-deploy` — установка и локальный запуск: [`.gigacode/skills/public-deploy/SKILL.md`](.gigacode/skills/public-deploy/SKILL.md);
 - `/public-health-check` — проверка MCP → REAL AS21 → Agent V4 → LLM → Web UI: [`.gigacode/skills/public-health-check/SKILL.md`](.gigacode/skills/public-health-check/SKILL.md).
 
-GigaCode должен запускаться **из клона Public-репозитория** и читать `GIGACODE.md`. Установку не считаем завершённой только по запуску процессов: нужен health check и реальный ограниченный запрос к AS21.
+**Пошаговые инструкции для коллег:** [macOS (zsh)](QUICKSTART_MACOS.md) · [Windows 11 (WSL2 + Ubuntu)](QUICKSTART_WINDOWS.md). Установка через нативный Windows PowerShell пока **не подтверждена независимым QA** и не заявлена как поддерживаемая; рекомендуемый путь — WSL2. Оба quickstart требуют настройки собственной сети/прав AS21 и собственных токенов без публикации.\n\nGigaCode должен запускаться **из клона Public-репозитория** и читать `GIGACODE.md`. Установку не считаем завершённой только по запуску процессов: нужен health check и реальный ограниченный запрос к AS21.
 
 ## 0. Архитектура и требования
 
