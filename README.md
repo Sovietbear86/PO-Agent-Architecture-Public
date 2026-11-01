@@ -15,6 +15,21 @@ This distribution is intentionally separated from the product-development reposi
 
 The public distribution includes vetted Python MCP-SWTR source in `mcp-swtr/`. The default stdio wrapper starts it without a separate checkout. Install its Python 3.13 dependencies and configure your own network/token credentials; see `DEPLOYMENT.md`. MCP's direct tool surface may include writes, so expose the community Task API's read-only facade rather than the raw MCP server.
 
+## Установка и проверка через GigaCode
+
+Для установки публичной версии доступны **два GigaCode Skills**, которые входят в репозиторий:
+
+- `/public-deploy` — установка комплектного MCP-SWTR, Task API, Agent Core V4 и Web UI (инструкции: [`.gigacode/skills/public-deploy/SKILL.md`](.gigacode/skills/public-deploy/SKILL.md)).
+- `/public-health-check` — послойная проверка подключения к **REAL AS21**, регистрации MCP tools, Agent V4, LLM и UI (инструкции: [`.gigacode/skills/public-health-check/SKILL.md`](.gigacode/skills/public-health-check/SKILL.md)).
+
+Начинайте с [`DEPLOYMENT.md`](DEPLOYMENT.md) — инструкция на русском с точными командами. После запуска проверьте работу:
+
+```bash
+python3 scripts/public_health_check.py --task-code PAY-123 --probe-agent
+```
+
+Замените `PAY-123` на реально существующую и доступную вам задачу AS21. Только корректный ответ от источника и доказательный результат агента позволяют получить `GREEN`. Без контрольной задачи вердикт будет `INCOMPLETE`, а не ложный успех. Скрипт не выводит исходные данные AS21 или токены.
+
 ## Configure your deployment
 
 The two deployment-owned configuration files are:

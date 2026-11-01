@@ -1086,7 +1086,7 @@ def main():
 
 
 @mcp.tool()
-async def get_my_tasks(assignee: str = Field(..., description="ФИО исполнителя (например, 'Калачанов Виктор')")) -> str:
+async def get_my_tasks(assignee: str = Field(..., description="ФИО исполнителя (например, 'Иванов Иван')")) -> str:
     """Получение задач на указанного исполнителя через поиск по фразе"""
     # Extract last name from full name
     parts = assignee.strip().split()
