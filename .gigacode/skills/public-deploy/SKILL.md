@@ -5,7 +5,7 @@ description: Развёртывание PO Agent Community из публично
 
 # Public Deploy — GigaCode skill
 
-## Назначение и ограничения
+**Платформенные quickstart:** [macOS](../../../QUICKSTART_MACOS.md) и [Windows через WSL2](../../../QUICKSTART_WINDOWS.md). На Windows выполняйте Linux/Bash-команды внутри Ubuntu WSL2; нативный PowerShell install не сертифицирован. Для обоих платформ подтверждайте действительную доступность источника и изоляцию локальных портов, не объявляйте GREEN только после установки зависимостей.\n\n## Назначение и ограничения
 
 Установи **публичную** версию `Sovietbear86/PO-Agent-Architecture-Public` из чистого checkout. Используй каноническую инструкцию `DEPLOYMENT.md`, не материалы старой рабочей ветки Review. После установки ОБЯЗАТЕЛЬНО вызови skill `public-health-check`. Версия считается развёрнутой только после его проверок, а не по факту запущенного Vite.
 
